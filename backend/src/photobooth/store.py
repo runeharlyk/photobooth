@@ -77,7 +77,10 @@ class CaptureStore:
         target = self.path(capture_id, name)
         os.replace(source, target)
         if os.name == "posix":
-            _fsync_directory(target.parent)
+            try:
+                _fsync_directory(target.parent)
+            except OSError:
+                logger.warning("could not sync the directory of %s; the file is in place", capture_id, exc_info=True)
 
     def path(self, capture_id: str, name: str) -> Path:
         return self._dir(capture_id) / name

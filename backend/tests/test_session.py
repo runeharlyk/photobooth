@@ -4,6 +4,7 @@ import shutil
 import threading
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -312,6 +313,62 @@ async def test_builds_run_one_capture_at_a_time_in_capture_order(
     for capture_id in (first.capture_id, second.capture_id):
         assert store.path(capture_id, BOOMERANG).stat().st_size > 0
         assert store.path(capture_id, VIDEO).stat().st_size > 0
+
+
+async def test_deleted_capture_is_never_encoded_while_waiting_for_the_build_slot(
+    booth, store, await_screen, boomerang_gate, monkeypatch
+):
+    building, release = boomerang_gate
+    encoded: list[Path] = []
+    gated_boomerang = session.build_boomerang
+
+    def recording(clip, fps, seconds, out):
+        encoded.append(clip)
+        gated_boomerang(clip, fps, seconds, out)
+
+    monkeypatch.setattr(session, "build_boomerang", recording)
+    await booth.tap()
+    kept = await await_screen(booth, Screen.RESULT)
+    assert await asyncio.to_thread(building.wait, 10)
+    await booth.new_photo()
+    discarded = await await_screen(booth, Screen.RESULT)
+    assert await booth.delete() is True
+    await booth.tap()
+    retake = await await_screen(booth, Screen.RESULT)
+
+    release.set()
+    await booth.close()
+
+    assert len({kept.capture_id, discarded.capture_id, retake.capture_id}) == 3
+    assert len(encoded) == 2
+    assert not store.exists(discarded.capture_id)
+    for capture_id in (kept.capture_id, retake.capture_id):
+        assert store.path(capture_id, BOOMERANG).stat().st_size > 0
+        assert store.path(capture_id, VIDEO).stat().st_size > 0
+
+
+async def test_video_is_not_encoded_for_a_capture_deleted_during_its_boomerang(
+    booth, store, await_screen, boomerang_gate, monkeypatch
+):
+    building, release = boomerang_gate
+    encoded: list[Path] = []
+    real_build_video = session.build_video
+
+    def recording(clip, *args):
+        encoded.append(clip)
+        real_build_video(clip, *args)
+
+    monkeypatch.setattr(session, "build_video", recording)
+    await booth.tap()
+    await await_screen(booth, Screen.RESULT)
+    assert await asyncio.to_thread(building.wait, 10)
+    assert await booth.delete() is True
+
+    release.set()
+    await booth.close()
+
+    assert encoded == []
+    assert list(store.root.iterdir()) == []
 
 
 async def test_clip_is_pruned_once_its_media_are_built_and_space_is_short(

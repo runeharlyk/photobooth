@@ -261,6 +261,8 @@ class Booth:
         timings = self._timings
         try:
             async with self._build_slot:
+                if not self._store.exists(capture_id):
+                    return
                 with tempfile.TemporaryDirectory(dir=self._store.root, prefix=_SCRATCH_PREFIX) as name:
                     scratch = Path(name)
                     await asyncio.to_thread(_write_inputs, scratch, photo, clip)
@@ -268,6 +270,8 @@ class Booth:
                     if clip_path:
                         boomerang = partial(build_boomerang, clip_path, fps, timings.boomerang_s, scratch / BOOMERANG)
                         await self._build_file(capture_id, scratch / BOOMERANG, "boomerang_ready", boomerang)
+                    if not self._store.exists(capture_id):
+                        return
                     video = partial(
                         build_video,
                         clip_path, fps, scratch / PHOTO, timings.flash_s, timings.flash_opacity, scratch / VIDEO,

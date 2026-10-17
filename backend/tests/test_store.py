@@ -116,6 +116,27 @@ def test_put_file_fsyncs_the_capture_directory_on_posix_only(
     assert store.path(capture_id, VIDEO).read_bytes() == b"video"
 
 
+def test_put_file_survives_a_failing_directory_fsync(
+    store: CaptureStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    capture_id = store.new_id()
+    store.create(capture_id, b"photo", [b"f"], 10.0)
+    source = tmp_path / "video.mp4"
+    source.write_bytes(b"video")
+
+    def failing(directory: Path) -> None:
+        raise OSError("input/output error")
+
+    monkeypatch.setattr(store_module, "_fsync_directory", failing)
+    monkeypatch.setattr(store_module, "os", _os_named("posix"))
+
+    with caplog.at_level(logging.WARNING, logger="photobooth.store"):
+        store.put_file(capture_id, VIDEO, source)
+
+    assert store.path(capture_id, VIDEO).read_bytes() == b"video"
+    assert capture_id in caplog.text
+
+
 def _make_id_dir(store: CaptureStore, files: dict[str, bytes]) -> str:
     capture_id = store.new_id()
     directory = store.root / capture_id
