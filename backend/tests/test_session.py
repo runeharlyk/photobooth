@@ -8,9 +8,10 @@ from dataclasses import replace
 import pytest
 
 from photobooth import session
+from photobooth.camera import CameraError
 from photobooth.camera.fake import FakeCamera
-from photobooth.session import FAILURE_MESSAGE, BoothState, Screen
-from photobooth.store import BOOMERANG, CLIP, META, PHOTO, VIDEO, CaptureState
+from photobooth.session import FAILURE_MESSAGE, Booth, BoothState, Screen
+from photobooth.store import BOOMERANG, CLIP, META, PHOTO, VIDEO, CaptureState, CaptureStore
 
 MEGABYTE = 1024 * 1024
 
@@ -339,3 +340,119 @@ async def test_full_disk_before_a_capture_is_a_fault(booth, camera, store, monke
     assert booth.state.fault == "Storage is full"
     assert camera.running is False
     assert stored_captures(store) == []
+
+
+class BrokenStillCamera(FakeCamera):
+    def capture_still(self) -> bytes:
+        raise RuntimeError("driver bug")
+
+
+class UnpluggedCamera(FakeCamera):
+    def __init__(self) -> None:
+        super().__init__(fps=30)
+        self.plugged_in = False
+
+    def start(self) -> None:
+        if not self.plugged_in:
+            raise CameraError("no such device")
+        super().start()
+
+
+async def test_unexpected_capture_error_returns_to_idle_with_the_camera_off(make_booth, store, await_state):
+    camera = BrokenStillCamera()
+    booth = make_booth(camera)
+    try:
+        await booth.tap()
+
+        failed = await await_state(booth, lambda state: state.message is not None)
+    finally:
+        camera.stop()
+
+    assert failed.screen is Screen.IDLE
+    assert failed.message == FAILURE_MESSAGE
+    assert camera.running is False
+    assert stored_captures(store) == []
+
+
+async def test_failing_keep_still_lets_the_result_time_out(make_booth, store, fast_timings, monkeypatch, await_screen, await_state):
+    def corrupt_meta(capture_id):
+        raise KeyError("state")
+
+    monkeypatch.setattr(store, "keep", corrupt_meta)
+    booth = make_booth(timings=replace(fast_timings, delete_window_s=0.2, result_timeout_s=1.0))
+    await booth.tap()
+    await await_screen(booth, Screen.RESULT)
+
+    closed = await await_state(booth, lambda state: not state.delete_available, 5)
+    assert closed.screen is Screen.RESULT
+    idle = await await_screen(booth, Screen.IDLE, 5)
+    assert idle.capture_id is None
+    assert await booth.delete() is False
+
+
+async def test_failing_timer_action_forces_idle(make_booth, camera, monkeypatch, await_screen):
+    booth = make_booth()
+
+    async def broken_time_out():
+        raise RuntimeError("timer bug")
+
+    monkeypatch.setattr(booth, "_time_out", broken_time_out)
+    await booth.tap()
+    await await_screen(booth, Screen.RESULT)
+
+    idle = await await_screen(booth, Screen.IDLE, 5)
+    assert idle.capture_id is None
+    assert camera.running is False
+    await booth.tap()
+    assert booth.state.screen is Screen.COUNTDOWN
+
+
+async def test_tap_clears_a_camera_fault_once_the_camera_works(make_booth, await_screen):
+    camera = UnpluggedCamera()
+    booth = make_booth(camera)
+    try:
+        await booth.start()
+        assert booth.state.fault == "Camera not found"
+
+        await booth.tap()
+        assert booth.state.screen is Screen.IDLE
+        assert booth.state.fault == "Camera not found"
+
+        camera.plugged_in = True
+        await booth.tap()
+        assert booth.state.screen is Screen.COUNTDOWN
+        assert booth.state.fault is None
+        await await_screen(booth, Screen.RESULT)
+    finally:
+        await booth.close()
+        camera.stop()
+
+
+async def test_tap_clears_a_storage_fault_once_space_is_freed(make_booth, camera, monkeypatch, await_screen):
+    real_disk_usage = shutil.disk_usage
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: real_disk_usage(path)._replace(free=100 * MEGABYTE))
+    booth = make_booth()
+    await booth.start()
+    assert booth.state.fault == "Storage is full"
+
+    monkeypatch.setattr(shutil, "disk_usage", real_disk_usage)
+    await booth.tap()
+
+    assert booth.state.screen is Screen.COUNTDOWN
+    assert booth.state.fault is None
+    await await_screen(booth, Screen.RESULT)
+
+
+async def test_unusable_media_root_degrades_to_a_fault(tmp_path, camera, fast_timings):
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_bytes(b"")
+
+    store = CaptureStore(blocker / "media")
+    store.recover()
+    booth = Booth(camera, store, fast_timings)
+    await booth.start()
+
+    assert booth.state.fault == "Cannot save photos"
+    await booth.tap()
+    assert booth.state.screen is Screen.IDLE
+    assert camera.running is False

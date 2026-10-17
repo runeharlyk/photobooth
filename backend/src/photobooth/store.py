@@ -40,7 +40,10 @@ class CaptureMeta:
 class CaptureStore:
     def __init__(self, root: Path) -> None:
         self.root = root
-        self.root.mkdir(parents=True, exist_ok=True)
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logger.exception("could not create media directory %s", root)
 
     def new_id(self) -> str:
         return secrets.token_urlsafe(16)
@@ -98,7 +101,12 @@ class CaptureStore:
         shutil.rmtree(doomed)
 
     def recover(self) -> None:
-        for entry in list(self.root.iterdir()):
+        try:
+            entries = list(self.root.iterdir())
+        except OSError:
+            logger.exception("could not list media directory %s", self.root)
+            return
+        for entry in entries:
             try:
                 self._recover_entry(entry)
             except OSError:

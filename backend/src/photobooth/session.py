@@ -51,7 +51,12 @@ class BoothState:
 
 
 class Booth:
-    """The capture sequence; every transition and camera call runs under one lock."""
+    """The capture sequence.
+
+    State transitions and the camera's start, stop and capture_still run under one lock.
+    _tick and next_frame run unlocked: FrameHub is thread-safe, and no other camera call
+    can run during COUNTDOWN.
+    """
 
     def __init__(self, camera: Camera, store: CaptureStore, timings: Timings) -> None:
         self._camera = camera
@@ -74,16 +79,19 @@ class Booth:
 
     async def start(self) -> None:
         async with self._lock:
-            fault = await asyncio.to_thread(self._probe_camera) or await asyncio.to_thread(self._check_storage)
-            if fault:
+            if fault := await self._diagnose():
                 self._update(fault=fault)
 
     async def tap(self) -> None:
         if self.state.screen is not Screen.IDLE:
             return
         async with self._lock:
-            if self.state.screen is Screen.IDLE and self.state.fault is None:
-                await self._begin_countdown()
+            if self.state.screen is not Screen.IDLE:
+                return
+            if self.state.fault is not None and (fault := await self._diagnose()):
+                self._update(fault=fault)
+                return
+            await self._begin_countdown()
 
     async def delete(self) -> bool:
         async with self._lock:
@@ -118,6 +126,9 @@ class Booth:
         if self._builds:
             await asyncio.wait(set(self._builds))
 
+    async def _diagnose(self) -> str | None:
+        return await asyncio.to_thread(self._probe_camera) or await asyncio.to_thread(self._check_storage)
+
     def _probe_camera(self) -> str | None:
         try:
             self._camera.start()
@@ -151,23 +162,30 @@ class Booth:
         self._countdown = asyncio.create_task(self._count_down(time.monotonic()))
 
     async def _count_down(self, began: float) -> None:
+        try:
+            frames = await self._run_countdown(began)
+        except Exception:
+            logger.exception("camera failed during the countdown")
+            frames = None
+        async with self._lock:
+            if frames is not None:
+                try:
+                    await self._shoot(frames)
+                    return
+                except Exception:
+                    logger.exception("capture failed")
+            await self._fail()
+
+    async def _run_countdown(self, began: float) -> list[Frame]:
         shot_at = began + self._timings.countdown_s
         ticker = asyncio.create_task(self._tick(shot_at))
         try:
             async with self._lock:
                 await asyncio.to_thread(self._camera.start)
-            frames = await self._record(began + self._timings.record_start_s, shot_at)
-        except CameraError:
-            logger.exception("camera failed during the countdown")
-            frames = None
+            return await self._record(began + self._timings.record_start_s, shot_at)
         finally:
             ticker.cancel()
             await asyncio.wait({ticker})
-        async with self._lock:
-            if frames is None:
-                await self._fail()
-            else:
-                await self._shoot(frames)
 
     async def _tick(self, shot_at: float) -> None:
         while (left := shot_at - time.monotonic()) > 0:
@@ -195,13 +213,8 @@ class Booth:
         clip = [frame.jpeg for frame in frames]
         fps = _measure_fps(frames)
         capture_id = self._store.new_id()
-        try:
-            photo = await asyncio.to_thread(self._camera.capture_still)
-            await asyncio.to_thread(self._store.create, capture_id, photo, clip, fps)
-        except (CameraError, OSError):
-            logger.exception("capture failed")
-            await self._fail()
-            return
+        photo = await asyncio.to_thread(self._camera.capture_still)
+        await asyncio.to_thread(self._store.create, capture_id, photo, clip, fps)
         await asyncio.to_thread(self._camera.stop)
         self._set_state(BoothState(Screen.RESULT, capture_id=capture_id, delete_available=True))
         self._schedule(_DELETE_WINDOW, self._timings.delete_window_s, self._keep_current)
@@ -211,16 +224,27 @@ class Booth:
         build.add_done_callback(self._builds.discard)
 
     async def _fail(self) -> None:
-        await asyncio.to_thread(self._camera.stop)
+        await self._stop_camera()
         self._set_idle(FAILURE_MESSAGE)
         self._schedule(_MESSAGE, self._timings.message_s, self._clear_message)
+
+    async def _force_idle(self) -> None:
+        self._cancel_timers(_DELETE_WINDOW, _RESULT_TIMEOUT)
+        await self._stop_camera()
+        self._set_idle()
+
+    async def _stop_camera(self) -> None:
+        try:
+            await asyncio.to_thread(self._camera.stop)
+        except Exception:
+            logger.exception("could not stop the camera")
 
     async def _keep_current(self) -> None:
         if not self.state.delete_available:
             return
         try:
             await asyncio.to_thread(self._store.keep, self.state.capture_id)
-        except OSError:
+        except Exception:
             logger.exception("could not mark capture %s kept", self.state.capture_id)
         self._update(delete_available=False)
 
@@ -271,7 +295,11 @@ class Booth:
         await asyncio.sleep(delay)
         async with self._lock:
             del self._timers[name]
-            await action()
+            try:
+                await action()
+            except Exception:
+                logger.exception("the %s failed; returning to idle", name)
+                await self._force_idle()
 
     def _cancel_timers(self, *names: str) -> None:
         for name in names:
