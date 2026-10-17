@@ -9,7 +9,7 @@ import pytest
 import uvicorn
 
 from photobooth.api import create_app
-from photobooth.session import Booth
+from photobooth.session import Booth, Screen
 from photobooth.sharing import qr_svg, share_url
 
 SHARE_BASE = "https://photo.example.invalid/p"
@@ -173,3 +173,61 @@ async def test_frontend_is_served_from_its_directory(serve, tmp_path):
     assert page.status_code == 200
     assert "<title>booth</title>" in page.text
     assert (await client.get("/api/preview.mjpg")).status_code == 404
+
+
+async def test_a_foreign_host_is_refused(client):
+    capture_id = (await take_photo(client))["capture_id"]
+
+    response = await client.get(f"/media/{capture_id}/photo.jpg", headers={"Host": "rebound.example"})
+
+    assert response.status_code == 400
+
+
+async def test_a_cross_site_tap_is_refused_and_the_booth_stays_idle(serve, make_booth):
+    booth = make_booth()
+    client = await serve(booth=booth)
+
+    assert (await client.post("/api/tap", headers={"Origin": "http://evil.example"})).status_code == 403
+    assert (await client.post("/api/tap", headers={"Sec-Fetch-Site": "cross-site"})).status_code == 403
+
+    assert booth.state.screen is Screen.IDLE
+
+
+async def test_a_same_origin_tap_is_accepted(serve, make_booth):
+    booth = make_booth()
+    client = await serve(booth=booth)
+    origin = str(client.base_url).rstrip("/")
+
+    response = await client.post("/api/tap", headers={"Origin": origin, "Sec-Fetch-Site": "same-origin"})
+
+    assert response.status_code == 204
+    assert booth.state.screen is not Screen.IDLE
+
+
+async def test_a_tap_through_the_dev_proxy_is_accepted(serve, make_booth):
+    booth = make_booth()
+    client = await serve(booth=booth)
+
+    response = await client.post(
+        "/api/tap",
+        headers={"Host": "localhost:5173", "Origin": "http://localhost:5173", "Sec-Fetch-Site": "same-origin"},
+    )
+
+    assert response.status_code == 204
+    assert booth.state.screen is not Screen.IDLE
+
+
+async def test_the_camera_stops_even_if_closing_the_booth_fails(make_booth, camera, store, monkeypatch):
+    booth = make_booth()
+
+    async def broken_close():
+        raise RuntimeError("close failed")
+
+    monkeypatch.setattr(booth, "close", broken_close)
+    app = create_app(booth, camera, store, SHARE_BASE, None)
+
+    with pytest.raises(RuntimeError):
+        async with app.router.lifespan_context(app):
+            await asyncio.to_thread(camera.start)
+
+    assert camera.running is False

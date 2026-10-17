@@ -5,7 +5,8 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -18,6 +19,14 @@ PREVIEW_SCREENS = (Screen.COUNTDOWN, Screen.CAPTURING)
 PREVIEW_BOUNDARY = "frame"
 FRAME_WAIT_S = 0.1
 CAMERA_POLL_S = 0.02
+ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+
+
+def refuse_cross_site(request: Request) -> None:
+    origin = request.headers.get("origin")
+    own_origin = f"{request.url.scheme}://{request.url.netloc}"
+    if (origin is not None and origin != own_origin) or request.headers.get("sec-fetch-site") == "cross-site":
+        raise HTTPException(status_code=403)
 
 
 def create_app(
@@ -33,10 +42,14 @@ def create_app(
         try:
             yield
         finally:
-            await booth.close()
-            await asyncio.to_thread(camera.stop)
+            try:
+                await booth.close()
+            finally:
+                await asyncio.to_thread(camera.stop)
 
     app = FastAPI(lifespan=lifespan)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
+    same_site = [Depends(refuse_cross_site)]
 
     def event_data(state: BoothState) -> str:
         payload = asdict(state)
@@ -72,15 +85,15 @@ def create_app(
     async def stream_events() -> StreamingResponse:
         return StreamingResponse(events(), media_type="text/event-stream")
 
-    @app.post("/api/tap", status_code=204)
+    @app.post("/api/tap", status_code=204, dependencies=same_site)
     async def tap() -> None:
         await booth.tap()
 
-    @app.post("/api/new-photo", status_code=204)
+    @app.post("/api/new-photo", status_code=204, dependencies=same_site)
     async def new_photo() -> None:
         await booth.new_photo()
 
-    @app.post("/api/delete", status_code=204)
+    @app.post("/api/delete", status_code=204, dependencies=same_site)
     async def delete() -> None:
         if not await booth.delete():
             raise HTTPException(status_code=409)
