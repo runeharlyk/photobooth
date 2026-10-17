@@ -3,6 +3,7 @@ import subprocess
 from pathlib import Path
 
 OUTPUT_SIZE = (1280, 720)
+FFMPEG_TIMEOUT_S = 60
 
 _STDERR_TAIL_CHARS = 2000
 _YUV420P = "scale=out_range=tv,format=yuv420p"
@@ -71,9 +72,20 @@ def _render(inputs: list[str], graph: str, fps: float, out: Path) -> None:
         "-an", "-movflags", "+faststart",
         str(part),
     ]
-    result = subprocess.run(command, check=False, capture_output=True)
+    try:
+        result = subprocess.run(command, check=False, capture_output=True, timeout=FFMPEG_TIMEOUT_S)
+    except subprocess.TimeoutExpired as error:
+        part.unlink(missing_ok=True)
+        raise MediaError(f"ffmpeg timed out after {FFMPEG_TIMEOUT_S} s") from error
+    except OSError as error:
+        part.unlink(missing_ok=True)
+        raise MediaError(f"ffmpeg could not run: {error}") from error
     if result.returncode != 0:
         part.unlink(missing_ok=True)
         tail = result.stderr.decode("utf-8", errors="replace")[-_STDERR_TAIL_CHARS:]
         raise MediaError(f"ffmpeg exited with {result.returncode}: {tail}")
-    os.replace(part, out)
+    try:
+        os.replace(part, out)
+    except OSError as error:
+        part.unlink(missing_ok=True)
+        raise MediaError(f"could not write {out.name}: {error}") from error

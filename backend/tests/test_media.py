@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from PIL import Image, ImageStat
 
+from photobooth import media
 from photobooth.media import OUTPUT_SIZE, MediaError, build_boomerang, build_video
 
 FPS = 30.0
@@ -162,3 +163,49 @@ def test_output_is_written_atomically(clip: Path, tmp_path: Path):
 
     assert out.exists()
     assert not out.with_suffix(".part.mp4").exists()
+
+
+def test_missing_ffmpeg_raises_media_error(clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def missing(*args, **kwargs):
+        raise FileNotFoundError("ffmpeg")
+
+    monkeypatch.setattr(media.subprocess, "run", missing)
+    out = tmp_path / "boomerang.mp4"
+
+    with pytest.raises(MediaError, match="ffmpeg"):
+        build_boomerang(clip, FPS, 0.5, out)
+    assert not out.with_suffix(".part.mp4").exists()
+
+
+def test_hung_ffmpeg_raises_media_error_and_removes_part(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    out = tmp_path / "boomerang.mp4"
+    part = out.with_suffix(".part.mp4")
+
+    def hang(*args, **kwargs):
+        part.write_bytes(b"partial")
+        assert kwargs["timeout"] == media.FFMPEG_TIMEOUT_S
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(media.subprocess, "run", hang)
+
+    with pytest.raises(MediaError, match="timed out"):
+        build_boomerang(clip, FPS, 0.5, out)
+    assert not part.exists()
+    assert not out.exists()
+
+
+def test_failed_rename_raises_media_error_and_removes_part(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    def locked(*args, **kwargs):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(media.os, "replace", locked)
+    out = tmp_path / "boomerang.mp4"
+
+    with pytest.raises(MediaError, match="in use"):
+        build_boomerang(clip, FPS, 0.5, out)
+    assert not out.with_suffix(".part.mp4").exists()
+    assert not out.exists()
