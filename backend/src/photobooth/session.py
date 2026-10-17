@@ -1,0 +1,305 @@
+import asyncio
+import logging
+import math
+import shutil
+import tempfile
+import time
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, replace
+from enum import StrEnum
+from functools import partial
+from pathlib import Path
+
+from photobooth.camera import Camera, CameraError, Frame
+from photobooth.config import Timings
+from photobooth.media import MediaError, build_boomerang, build_video
+from photobooth.store import BOOMERANG, CLIP, PHOTO, VIDEO, CaptureStore
+
+MIN_FREE_BYTES = 500 * 1024 * 1024
+FALLBACK_FPS = 30.0
+
+FAILURE_MESSAGE = "Something went wrong - try again"
+CAMERA_NOT_FOUND = "Camera not found"
+CANNOT_SAVE = "Cannot save photos"
+STORAGE_FULL = "Storage is full"
+
+_DELETE_WINDOW = "delete window"
+_RESULT_TIMEOUT = "result timeout"
+_MESSAGE = "message"
+_SCRATCH_PREFIX = ".tmp-build-"
+
+logger = logging.getLogger(__name__)
+
+
+class Screen(StrEnum):
+    IDLE = "idle"
+    COUNTDOWN = "countdown"
+    CAPTURING = "capturing"
+    RESULT = "result"
+
+
+@dataclass(frozen=True)
+class BoothState:
+    screen: Screen
+    remaining: int | None = None
+    capture_id: str | None = None
+    delete_available: bool = False
+    boomerang_ready: bool = False
+    video_ready: bool = False
+    message: str | None = None
+    fault: str | None = None
+
+
+class Booth:
+    """The capture sequence; every transition and camera call runs under one lock."""
+
+    def __init__(self, camera: Camera, store: CaptureStore, timings: Timings) -> None:
+        self._camera = camera
+        self._store = store
+        self._timings = timings
+        self.state = BoothState(Screen.IDLE)
+        self._lock = asyncio.Lock()
+        self._subscribers: set[asyncio.Queue[BoothState]] = set()
+        self._timers: dict[str, asyncio.Task[None]] = {}
+        self._countdown: asyncio.Task[None] | None = None
+        self._builds: set[asyncio.Task[None]] = set()
+
+    def subscribe(self) -> asyncio.Queue[BoothState]:
+        queue: asyncio.Queue[BoothState] = asyncio.Queue()
+        self._subscribers.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue[BoothState]) -> None:
+        self._subscribers.discard(queue)
+
+    async def start(self) -> None:
+        async with self._lock:
+            fault = await asyncio.to_thread(self._probe_camera) or await asyncio.to_thread(self._check_storage)
+            if fault:
+                self._update(fault=fault)
+
+    async def tap(self) -> None:
+        async with self._lock:
+            if self.state.screen is Screen.IDLE and self.state.fault is None:
+                await self._begin_countdown()
+
+    async def delete(self) -> bool:
+        async with self._lock:
+            capture_id = self.state.capture_id
+            if not self.state.delete_available:
+                return False
+            try:
+                await asyncio.to_thread(self._store.delete, capture_id)
+            except OSError:
+                logger.exception("could not delete capture %s", capture_id)
+                if self._store.exists(capture_id):
+                    return False
+            self._cancel_timers(_DELETE_WINDOW, _RESULT_TIMEOUT)
+            self._set_idle()
+            return True
+
+    async def new_photo(self) -> None:
+        async with self._lock:
+            if self.state.screen is Screen.RESULT:
+                self._cancel_timers(_DELETE_WINDOW, _RESULT_TIMEOUT)
+                await self._keep_current()
+                await self._begin_countdown()
+
+    async def close(self) -> None:
+        async with self._lock:
+            pending = [*self._timers.values(), *([self._countdown] if self._countdown else [])]
+            self._timers.clear()
+            for task in pending:
+                task.cancel()
+        if pending:
+            await asyncio.wait(pending)
+        if self._builds:
+            await asyncio.wait(set(self._builds))
+
+    def _probe_camera(self) -> str | None:
+        try:
+            self._camera.start()
+        except CameraError:
+            logger.exception("camera probe failed")
+            return CAMERA_NOT_FOUND
+        finally:
+            self._camera.stop()
+        return None
+
+    def _check_storage(self) -> str | None:
+        try:
+            with tempfile.TemporaryFile(dir=self._store.root):
+                pass
+        except OSError:
+            logger.exception("media directory %s is not writable", self._store.root)
+            return CANNOT_SAVE
+        free = shutil.disk_usage(self._store.root).free
+        if free < MIN_FREE_BYTES:
+            logger.error("media directory %s has only %d bytes free", self._store.root, free)
+            return STORAGE_FULL
+        return None
+
+    async def _begin_countdown(self) -> None:
+        self._cancel_timers(_MESSAGE)
+        fault = await asyncio.to_thread(self._check_storage)
+        if fault:
+            self._set_state(BoothState(Screen.IDLE, fault=fault))
+            return
+        try:
+            await asyncio.to_thread(self._camera.start)
+        except CameraError:
+            logger.exception("camera failed to start")
+            await self._fail()
+            return
+        self._set_state(BoothState(Screen.COUNTDOWN, remaining=math.ceil(self._timings.countdown_s)))
+        self._countdown = asyncio.create_task(self._count_down())
+
+    async def _count_down(self) -> None:
+        began = time.monotonic()
+        shot_at = began + self._timings.countdown_s
+        ticker = asyncio.create_task(self._tick(shot_at))
+        try:
+            frames = await self._record(began + self._timings.record_start_s, shot_at)
+        except CameraError:
+            logger.exception("camera failed during the countdown")
+            frames = None
+        finally:
+            ticker.cancel()
+            await asyncio.wait({ticker})
+        async with self._lock:
+            if frames is None:
+                await self._fail()
+            else:
+                await self._shoot(frames)
+
+    async def _tick(self, shot_at: float) -> None:
+        while (left := shot_at - time.monotonic()) > 0:
+            remaining = math.ceil(left)
+            if remaining != self.state.remaining:
+                self._update(remaining=remaining)
+            await asyncio.sleep(left - (remaining - 1))
+
+    async def _record(self, start_at: float, shot_at: float) -> list[Frame]:
+        await asyncio.sleep(start_at - time.monotonic())
+        frames: list[Frame] = []
+        after_seq = 0
+        while (left := shot_at - time.monotonic()) > 0:
+            try:
+                frame = await asyncio.to_thread(self._camera.next_frame, after_seq, left)
+            except TimeoutError:
+                break
+            after_seq = frame.seq
+            if frame.t >= start_at:
+                frames.append(frame)
+        return frames
+
+    async def _shoot(self, frames: list[Frame]) -> None:
+        self._update(screen=Screen.CAPTURING, remaining=None)
+        clip = [frame.jpeg for frame in frames]
+        fps = _measure_fps(frames)
+        capture_id = self._store.new_id()
+        try:
+            photo = await asyncio.to_thread(self._camera.capture_still)
+            await asyncio.to_thread(self._store.create, capture_id, photo, clip, fps)
+        except (CameraError, OSError):
+            logger.exception("capture failed")
+            await self._fail()
+            return
+        await asyncio.to_thread(self._camera.stop)
+        self._set_state(BoothState(Screen.RESULT, capture_id=capture_id, delete_available=True))
+        self._schedule(_DELETE_WINDOW, self._timings.delete_window_s, self._keep_current)
+        self._schedule(_RESULT_TIMEOUT, self._timings.result_timeout_s, self._time_out)
+        build = asyncio.create_task(self._build_media(capture_id, photo, clip, fps))
+        self._builds.add(build)
+        build.add_done_callback(self._builds.discard)
+
+    async def _fail(self) -> None:
+        await asyncio.to_thread(self._camera.stop)
+        self._set_idle(FAILURE_MESSAGE)
+        self._schedule(_MESSAGE, self._timings.message_s, self._clear_message)
+
+    async def _keep_current(self) -> None:
+        if not self.state.delete_available:
+            return
+        try:
+            await asyncio.to_thread(self._store.keep, self.state.capture_id)
+        except OSError:
+            logger.exception("could not mark capture %s kept", self.state.capture_id)
+        self._update(delete_available=False)
+
+    async def _time_out(self) -> None:
+        self._cancel_timers(_DELETE_WINDOW)
+        await self._keep_current()
+        self._set_idle()
+
+    async def _clear_message(self) -> None:
+        self._update(message=None)
+
+    async def _build_media(self, capture_id: str, photo: bytes, clip: Sequence[bytes], fps: float) -> None:
+        timings = self._timings
+        try:
+            with tempfile.TemporaryDirectory(dir=self._store.root, prefix=_SCRATCH_PREFIX) as name:
+                scratch = Path(name)
+                await asyncio.to_thread(_write_inputs, scratch, photo, clip)
+                clip_path = scratch / CLIP if clip else None
+                if clip_path:
+                    boomerang = partial(build_boomerang, clip_path, fps, timings.boomerang_s, scratch / BOOMERANG)
+                    await self._build_file(capture_id, scratch / BOOMERANG, "boomerang_ready", boomerang)
+                video = partial(
+                    build_video,
+                    clip_path, fps, scratch / PHOTO, timings.flash_s, timings.flash_opacity, scratch / VIDEO,
+                )
+                await self._build_file(capture_id, scratch / VIDEO, "video_ready", video)
+        except OSError:
+            logger.exception("could not store media for capture %s", capture_id)
+
+    async def _build_file(self, capture_id: str, out: Path, flag: str, build: Callable[[], None]) -> None:
+        try:
+            await asyncio.to_thread(build)
+        except MediaError:
+            logger.exception("could not build %s for capture %s", out.name, capture_id)
+            return
+        async with self._lock:
+            if not self._store.exists(capture_id):
+                return
+            self._store.put_file(capture_id, out.name, out)
+            if self.state.capture_id == capture_id:
+                self._update(**{flag: True})
+
+    def _schedule(self, name: str, delay: float, action: Callable[[], Awaitable[None]]) -> None:
+        self._cancel_timers(name)
+        self._timers[name] = asyncio.create_task(self._fire(name, delay, action))
+
+    async def _fire(self, name: str, delay: float, action: Callable[[], Awaitable[None]]) -> None:
+        await asyncio.sleep(delay)
+        async with self._lock:
+            del self._timers[name]
+            await action()
+
+    def _cancel_timers(self, *names: str) -> None:
+        for name in names:
+            timer = self._timers.pop(name, None)
+            if timer is not None:
+                timer.cancel()
+
+    def _set_idle(self, message: str | None = None) -> None:
+        self._set_state(BoothState(Screen.IDLE, message=message, fault=self.state.fault))
+
+    def _update(self, **changes: object) -> None:
+        self._set_state(replace(self.state, **changes))
+
+    def _set_state(self, state: BoothState) -> None:
+        self.state = state
+        for queue in self._subscribers:
+            queue.put_nowait(state)
+
+
+def _measure_fps(frames: Sequence[Frame]) -> float:
+    span = frames[-1].t - frames[0].t if len(frames) >= 2 else 0.0
+    return (len(frames) - 1) / span if span > 0 else FALLBACK_FPS
+
+
+def _write_inputs(scratch: Path, photo: bytes, clip: Sequence[bytes]) -> None:
+    (scratch / PHOTO).write_bytes(photo)
+    if clip:
+        (scratch / CLIP).write_bytes(b"".join(clip))
