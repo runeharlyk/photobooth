@@ -30,6 +30,8 @@
 
 <style>
   .result {
+    --qr-border: 16px;
+
     position: absolute;
     inset: 0;
   }
@@ -68,7 +70,7 @@
 
   .scan {
     align-self: center;
-    margin-bottom: -36px;
+    margin-bottom: calc(var(--qr-border) * -1);
     z-index: 1;
   }
 
@@ -76,7 +78,7 @@
     display: block;
     width: 100%;
     aspect-ratio: 1;
-    border: 16px solid #fff;
+    border: var(--qr-border) solid #fff;
     background: #fff;
   }
 
