@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -85,3 +86,84 @@ def test_put_file_replaces_atomically(store: CaptureStore, tmp_path: Path):
     assert store.path(capture_id, VIDEO).read_bytes() == b"second"
     assert not first.exists()
     assert not second.exists()
+
+
+def _make_id_dir(store: CaptureStore, files: dict[str, bytes]) -> str:
+    capture_id = store.new_id()
+    directory = store.root / capture_id
+    directory.mkdir()
+    for name, content in files.items():
+        (directory / name).write_bytes(content)
+    return capture_id
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        {PHOTO: b"photo"},
+        {PHOTO: b"photo", META: b'{"id": "trunc'},
+        {PHOTO: b"photo", META: b"\x00\xff garbage"},
+        {PHOTO: b"photo", META: b"[]"},
+    ],
+    ids=["missing-metadata", "truncated-metadata", "garbled-metadata", "wrong-shape"],
+)
+def test_recover_removes_capture_with_unreadable_metadata(
+    store: CaptureStore, files: dict[str, bytes]
+):
+    broken_id = _make_id_dir(store, files)
+    pending_id = store.new_id()
+    store.create(pending_id, b"photo", [b"f"], 10.0)
+    partial = store.root / ".tmp-leftover"
+    partial.mkdir()
+
+    store.recover()
+
+    assert not (store.root / broken_id).exists()
+    assert not partial.exists()
+    assert store.meta(pending_id).state == CaptureState.KEPT
+
+
+def test_create_fsyncs_every_file_before_the_rename(
+    store: CaptureStore, monkeypatch: pytest.MonkeyPatch
+):
+    events: list[str] = []
+    real_fsync, real_rename = os.fsync, os.rename
+
+    def spy_fsync(fd: int) -> None:
+        events.append("fsync")
+        real_fsync(fd)
+
+    def spy_rename(src, dst) -> None:
+        events.append("rename")
+        real_rename(src, dst)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "rename", spy_rename)
+
+    store.create(store.new_id(), b"photo", [b"a", b"b"], 10.0)
+
+    assert events[:4] == ["fsync", "fsync", "fsync", "rename"]
+
+
+def test_keep_fsyncs_metadata_before_replacing_it(
+    store: CaptureStore, monkeypatch: pytest.MonkeyPatch
+):
+    capture_id = store.new_id()
+    store.create(capture_id, b"photo", [b"f"], 10.0)
+    events: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def spy_fsync(fd: int) -> None:
+        events.append("fsync")
+        real_fsync(fd)
+
+    def spy_replace(src, dst) -> None:
+        events.append("replace")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    store.keep(capture_id)
+
+    assert events == ["fsync", "replace"]

@@ -3,7 +3,7 @@ import os
 import re
 import secrets
 import shutil
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -52,10 +52,8 @@ class CaptureStore:
         target = self._dir(capture_id)
         staging = self.root / f"{_TMP_PREFIX}{capture_id}"
         staging.mkdir()
-        (staging / PHOTO).write_bytes(photo)
-        with (staging / CLIP).open("wb") as clip:
-            for frame in clip_frames:
-                clip.write(frame)
+        _write_durably(staging / PHOTO, [photo])
+        _write_durably(staging / CLIP, clip_frames)
         meta = CaptureMeta(
             id=capture_id,
             captured_at=_utc_now(),
@@ -63,8 +61,10 @@ class CaptureStore:
             uploaded=False,
             clip_fps=clip_fps,
         )
-        (staging / META).write_text(_dump(meta), encoding="utf-8")
+        _write_durably(staging / META, [_dump(meta).encode("utf-8")])
         os.rename(staging, target)
+        if os.name == "posix":
+            _fsync_directory(self.root)
 
     def put_file(self, capture_id: str, name: str, source: Path) -> None:
         os.replace(source, self.path(capture_id, name))
@@ -101,7 +101,12 @@ class CaptureStore:
             if entry.name.startswith(_TMP_PREFIX):
                 shutil.rmtree(entry)
             elif _ID_PATTERN.fullmatch(entry.name):
-                if self.meta(entry.name).state == CaptureState.PENDING:
+                try:
+                    pending = self.meta(entry.name).state == CaptureState.PENDING
+                except (OSError, ValueError, KeyError, TypeError):
+                    shutil.rmtree(entry)
+                    continue
+                if pending:
                     self.keep(entry.name)
 
     def _dir(self, capture_id: str) -> Path:
@@ -112,8 +117,24 @@ class CaptureStore:
     def _write_meta(self, meta: CaptureMeta) -> None:
         final = self.path(meta.id, META)
         staging = final.with_suffix(".json.tmp")
-        staging.write_text(_dump(meta), encoding="utf-8")
+        _write_durably(staging, [_dump(meta).encode("utf-8")])
         os.replace(staging, final)
+
+
+def _write_durably(path: Path, chunks: Iterable[bytes]) -> None:
+    with path.open("wb") as file:
+        for chunk in chunks:
+            file.write(chunk)
+        file.flush()
+        os.fsync(file.fileno())
+
+
+def _fsync_directory(directory: Path) -> None:
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _dump(meta: CaptureMeta) -> str:
