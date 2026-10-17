@@ -2,6 +2,7 @@ import asyncio
 import itertools
 import shutil
 import threading
+import time
 from dataclasses import replace
 
 import pytest
@@ -31,6 +32,23 @@ def screens_entered(states: list[BoothState]) -> list[Screen]:
         if state.screen is not previous.screen:
             entered.append(state.screen)
     return entered
+
+
+async def wait_for_frames(camera: FakeCamera) -> None:
+    async with asyncio.timeout(5):
+        while not camera.running:
+            await asyncio.sleep(0.01)
+    await asyncio.to_thread(camera.next_frame, 0, 5)
+
+
+class SlowStartCamera(FakeCamera):
+    def __init__(self, delay_s: float) -> None:
+        super().__init__(fps=30)
+        self.delay_s = delay_s
+
+    def start(self) -> None:
+        time.sleep(self.delay_s)
+        super().start()
 
 
 @pytest.fixture
@@ -70,6 +88,34 @@ async def test_full_cycle_produces_three_media(make_booth, camera, store, fast_t
     assert ready.capture_id == result.capture_id
     for name in (PHOTO, BOOMERANG, VIDEO):
         assert store.path(result.capture_id, name).stat().st_size > 0
+
+
+async def test_countdown_publishes_each_second(make_booth, fast_timings, await_screen):
+    booth = make_booth(timings=replace(fast_timings, countdown_s=2.2, record_start_s=1.6))
+    events = booth.subscribe()
+
+    await booth.tap()
+    await await_screen(booth, Screen.CAPTURING)
+
+    assert [state.remaining for state in drain(events) if state.screen is Screen.COUNTDOWN] == [3, 2, 1]
+
+
+async def test_countdown_starts_before_the_camera_is_up(make_booth, store, await_screen):
+    slow_camera = SlowStartCamera(delay_s=0.8)
+    booth = make_booth(slow_camera)
+    try:
+        await asyncio.wait_for(booth.tap(), 0.5)
+
+        assert booth.state.screen is Screen.COUNTDOWN
+        assert slow_camera.running is False
+        result = await await_screen(booth, Screen.RESULT)
+    finally:
+        await booth.close()
+        slow_camera.stop()
+
+    assert store.path(result.capture_id, PHOTO).stat().st_size > 0
+    assert store.path(result.capture_id, CLIP).stat().st_size == 0
+    assert slow_camera.running is False
 
 
 async def test_camera_off_at_idle(booth, camera, await_screen):
@@ -142,8 +188,9 @@ async def test_camera_start_failure_returns_to_idle(make_booth, store, await_sta
 
     await booth.tap()
 
-    assert booth.state.screen is Screen.IDLE
-    assert booth.state.message == FAILURE_MESSAGE
+    failed = await await_state(booth, lambda state: state.message is not None)
+    assert failed.screen is Screen.IDLE
+    assert failed.message == FAILURE_MESSAGE
     assert camera.running is False
     cleared = await await_state(booth, lambda state: state.message is None, 5)
     assert cleared.screen is Screen.IDLE
@@ -152,9 +199,26 @@ async def test_camera_start_failure_returns_to_idle(make_booth, store, await_sta
 
 async def test_camera_dies_mid_countdown(booth, camera, store, await_state):
     await booth.tap()
+    await wait_for_frames(camera)
     assert booth.state.screen is Screen.COUNTDOWN
 
     camera.kill()
+
+    failed = await await_state(booth, lambda state: state.message is not None)
+    assert failed.screen is Screen.IDLE
+    assert failed.message == FAILURE_MESSAGE
+    assert camera.running is False
+    assert stored_captures(store) == []
+
+
+async def test_failed_save_stops_the_camera(booth, camera, store, monkeypatch, await_state):
+    def full_disk(*args):
+        assert camera.running
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(store, "create", full_disk)
+
+    await booth.tap()
 
     failed = await await_state(booth, lambda state: state.message is not None)
     assert failed.screen is Screen.IDLE
@@ -168,6 +232,7 @@ async def test_empty_clip_still_gives_photo_and_video(
 ):
     booth = make_booth(timings=replace(fast_timings, record_start_s=0.55, result_timeout_s=30))
     await booth.tap()
+    await wait_for_frames(camera)
     camera.hold()
 
     result = await await_screen(booth, Screen.RESULT)

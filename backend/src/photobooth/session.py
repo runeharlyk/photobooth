@@ -79,6 +79,8 @@ class Booth:
                 self._update(fault=fault)
 
     async def tap(self) -> None:
+        if self.state.screen is not Screen.IDLE:
+            return
         async with self._lock:
             if self.state.screen is Screen.IDLE and self.state.fault is None:
                 await self._begin_countdown()
@@ -145,20 +147,15 @@ class Booth:
         if fault:
             self._set_state(BoothState(Screen.IDLE, fault=fault))
             return
-        try:
-            await asyncio.to_thread(self._camera.start)
-        except CameraError:
-            logger.exception("camera failed to start")
-            await self._fail()
-            return
         self._set_state(BoothState(Screen.COUNTDOWN, remaining=math.ceil(self._timings.countdown_s)))
-        self._countdown = asyncio.create_task(self._count_down())
+        self._countdown = asyncio.create_task(self._count_down(time.monotonic()))
 
-    async def _count_down(self) -> None:
-        began = time.monotonic()
+    async def _count_down(self, began: float) -> None:
         shot_at = began + self._timings.countdown_s
         ticker = asyncio.create_task(self._tick(shot_at))
         try:
+            async with self._lock:
+                await asyncio.to_thread(self._camera.start)
             frames = await self._record(began + self._timings.record_start_s, shot_at)
         except CameraError:
             logger.exception("camera failed during the countdown")
