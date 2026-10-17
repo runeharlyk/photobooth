@@ -232,3 +232,20 @@ def test_part_file_is_fsynced_before_it_is_renamed(clip: Path, tmp_path: Path, m
 
     assert [name for name, _ in events] == ["fsync", "replace"]
     assert events[0][1] == events[1][1] > 0
+
+
+def test_encoder_runs_with_the_configured_preset(clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    commands: list[list[str]] = []
+    real_run = subprocess.run
+
+    def spy(command, **kwargs):
+        commands.append(command)
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(media.subprocess, "run", spy)
+    monkeypatch.setattr(media, "X264_PRESET", "ultrafast")
+
+    build_boomerang(clip, FPS, 0.5, tmp_path / "boomerang.mp4")
+
+    command = commands[0]
+    assert command[command.index("-preset") + 1] == "ultrafast"

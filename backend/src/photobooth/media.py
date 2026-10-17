@@ -4,6 +4,7 @@ from pathlib import Path
 
 OUTPUT_SIZE = (1280, 720)
 FFMPEG_TIMEOUT_S = 60
+X264_PRESET = "veryfast"
 
 _STDERR_TAIL_CHARS = 2000
 _YUV420P = "scale=out_range=tv,format=yuv420p"
@@ -68,7 +69,7 @@ def _render(inputs: list[str], graph: str, fps: float, out: Path) -> None:
         "-filter_complex", graph,
         "-map", "[v]",
         "-r", str(fps),
-        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", X264_PRESET, "-pix_fmt", "yuv420p",
         "-an", "-movflags", "+faststart",
         str(part),
     ]

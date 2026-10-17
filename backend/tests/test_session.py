@@ -278,6 +278,42 @@ async def test_new_photo_during_build_finishes_old_media(booth, store, await_scr
     assert store.path(first.capture_id, VIDEO).stat().st_size > 0
 
 
+async def test_builds_run_one_capture_at_a_time_in_capture_order(
+    booth, store, await_screen, boomerang_gate, monkeypatch
+):
+    building, release = boomerang_gate
+    events: list[tuple[str, str]] = []
+    gated_boomerang = session.build_boomerang
+
+    def recording(clip, fps, seconds, out):
+        events.append(("start", clip.parent.name))
+        try:
+            gated_boomerang(clip, fps, seconds, out)
+        finally:
+            events.append(("finish", clip.parent.name))
+
+    monkeypatch.setattr(session, "build_boomerang", recording)
+    await booth.tap()
+    first = await await_screen(booth, Screen.RESULT)
+    assert await asyncio.to_thread(building.wait, 10)
+
+    await booth.new_photo()
+    second = await await_screen(booth, Screen.RESULT)
+    await asyncio.sleep(0.5)
+
+    assert second.capture_id != first.capture_id
+    assert [kind for kind, _ in events] == ["start"]
+
+    release.set()
+    await booth.close()
+
+    assert [kind for kind, _ in events] == ["start", "finish", "start", "finish"]
+    assert events[0][1] == events[1][1] != events[2][1] == events[3][1]
+    for capture_id in (first.capture_id, second.capture_id):
+        assert store.path(capture_id, BOOMERANG).stat().st_size > 0
+        assert store.path(capture_id, VIDEO).stat().st_size > 0
+
+
 async def test_media_finished_after_the_result_screen_leaves_flags_alone(booth, store, await_screen, boomerang_gate):
     building, release = boomerang_gate
     await booth.tap()

@@ -68,6 +68,7 @@ class Booth:
         self._timers: dict[str, asyncio.Task[None]] = {}
         self._countdown: asyncio.Task[None] | None = None
         self._builds: set[asyncio.Task[None]] = set()
+        self._build_slot = asyncio.Semaphore(1)
 
     def subscribe(self) -> asyncio.Queue[BoothState]:
         queue: asyncio.Queue[BoothState] = asyncio.Queue()
@@ -259,18 +260,19 @@ class Booth:
     async def _build_media(self, capture_id: str, photo: bytes, clip: Sequence[bytes], fps: float) -> None:
         timings = self._timings
         try:
-            with tempfile.TemporaryDirectory(dir=self._store.root, prefix=_SCRATCH_PREFIX) as name:
-                scratch = Path(name)
-                await asyncio.to_thread(_write_inputs, scratch, photo, clip)
-                clip_path = scratch / CLIP if clip else None
-                if clip_path:
-                    boomerang = partial(build_boomerang, clip_path, fps, timings.boomerang_s, scratch / BOOMERANG)
-                    await self._build_file(capture_id, scratch / BOOMERANG, "boomerang_ready", boomerang)
-                video = partial(
-                    build_video,
-                    clip_path, fps, scratch / PHOTO, timings.flash_s, timings.flash_opacity, scratch / VIDEO,
-                )
-                await self._build_file(capture_id, scratch / VIDEO, "video_ready", video)
+            async with self._build_slot:
+                with tempfile.TemporaryDirectory(dir=self._store.root, prefix=_SCRATCH_PREFIX) as name:
+                    scratch = Path(name)
+                    await asyncio.to_thread(_write_inputs, scratch, photo, clip)
+                    clip_path = scratch / CLIP if clip else None
+                    if clip_path:
+                        boomerang = partial(build_boomerang, clip_path, fps, timings.boomerang_s, scratch / BOOMERANG)
+                        await self._build_file(capture_id, scratch / BOOMERANG, "boomerang_ready", boomerang)
+                    video = partial(
+                        build_video,
+                        clip_path, fps, scratch / PHOTO, timings.flash_s, timings.flash_opacity, scratch / VIDEO,
+                    )
+                    await self._build_file(capture_id, scratch / VIDEO, "video_ready", video)
         except OSError:
             logger.exception("could not store media for capture %s", capture_id)
 
