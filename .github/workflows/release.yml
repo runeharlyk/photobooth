@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.2.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Build the frontend into the backend package
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm check
+          pnpm build
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Test the backend
+        working-directory: backend
+        run: uv run pytest -q
+
+      - name: Build the wheel
+        working-directory: backend
+        run: |
+          uv version "${GITHUB_REF_NAME#v}"
+          uv build --wheel
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME"
+          backend/dist/*.whl deploy/pi/install-pi.sh
+          --title "$GITHUB_REF_NAME" --generate-notes
