@@ -10,7 +10,7 @@ from photobooth.config import load_config
 from photobooth.session import Booth
 from photobooth.store import CaptureStore
 
-FRONTEND_DIST = Path(__file__).resolve().parents[3] / "frontend" / "dist"
+WEB_DIR = Path(__file__).resolve().parent / "web"
 SHUTDOWN_GRACE_S = 2
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
@@ -25,7 +25,7 @@ def main() -> None:
     store.recover()
     camera = make_camera(config.camera)
     booth = Booth(camera, store, config.timings)
-    frontend_dir = FRONTEND_DIST if FRONTEND_DIST.is_dir() else None
+    frontend_dir = WEB_DIR if WEB_DIR.is_dir() else None
     app = create_app(booth, camera, store, config.share_base_url, frontend_dir)
     uvicorn.run(app, host=config.host, port=config.port, timeout_graceful_shutdown=SHUTDOWN_GRACE_S)
 
