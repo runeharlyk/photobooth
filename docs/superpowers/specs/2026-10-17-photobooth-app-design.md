@@ -69,6 +69,7 @@ Timings (countdown 3 s, recording start 1 s, flash 2 s and 95 %, boomerang lengt
 ## Media and the QR link
 
 Each capture gets a random, unguessable id at the moment of the shot. Its files live together under one directory per capture: the photo, the clip, the boomerang and the video, plus a small metadata file holding the id, the capture time, its state and an `uploaded` marker the later uploader will use.
+The clip is kept only so the boomerang and video can be re-exported if the way they are made changes: clips stay while more than 5 GB is free, and below that the oldest clips are deleted first, never the photo, boomerang or video, and never a clip whose media are not yet built (the owner's rule).
 The state is `pending` while Delete is available and `kept` afterwards, written by the result flow, so the later uploader takes only `kept` captures and never needs to know about screens. A capture found `pending` at startup, after a crash or power cut, becomes `kept`, since the rule is keep unless deleted (designer's call).
 
 The QR code encodes `{share_base_url}/{id}`, built locally the instant the result screen opens; `share_base_url` is configuration. The Cloudflare Worker that will answer that URL, showing "getting your photos ready" until the uploads arrive, is a later milestone. Until it exists the link does not resolve; that is accepted for this version.
