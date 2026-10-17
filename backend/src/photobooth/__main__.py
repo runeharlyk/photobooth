@@ -1,4 +1,5 @@
 import argparse
+import logging
 from pathlib import Path
 
 import uvicorn
@@ -11,9 +12,11 @@ from photobooth.store import CaptureStore
 
 FRONTEND_DIST = Path(__file__).resolve().parents[3] / "frontend" / "dist"
 SHUTDOWN_GRACE_S = 2
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
     parser = argparse.ArgumentParser(prog="photobooth", description="Run the photobooth server.")
     parser.add_argument("--config", type=Path, required=True, help="path to the TOML configuration")
     config = load_config(parser.parse_args().config)
