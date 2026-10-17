@@ -18,7 +18,7 @@
 <div class="idle">
   <Confetti opacity={0.85} />
   <button class="tap circle" class:inert={fault} style:--d="calc(var(--idle-d) * 1px)" onclick={press}>
-    <span class="label"><Sticker tilt={-7} size={67}>TAP HERE</Sticker></span>
+    <span class="label"><Sticker tilt={-7} size={67} border={7} shadow={[8, 10]}>TAP HERE</Sticker></span>
   </button>
   <p class:alert={fault || message}>{fault ?? message ?? 'Take a photo'}</p>
 </div>

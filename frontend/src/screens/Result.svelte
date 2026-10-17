@@ -17,7 +17,7 @@
     {/if}
   </div>
   <div class="side">
-    <div class="scan"><Sticker tilt={-5} size={24}>SCAN TO GET YOUR PHOTO</Sticker></div>
+    <div class="scan"><Sticker tilt={-5} size={31} border={5} shadow={[6, 8]}>SCAN TO GET<br />YOUR PHOTO</Sticker></div>
     <img class="qr" src="/api/captures/{state.capture_id}/qr.svg" alt="" />
     <div class="actions">
       {#if state.delete_available}
@@ -68,7 +68,7 @@
 
   .scan {
     align-self: center;
-    margin-bottom: -24px;
+    margin-bottom: -36px;
     z-index: 1;
   }
 
