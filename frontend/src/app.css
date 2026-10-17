@@ -1,0 +1,50 @@
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/800.css';
+@import '@fontsource/archivo-black/400.css';
+
+:root {
+  --green: #2bd96b;
+  --green-rim: #1fa652;
+  --muted: #bbb;
+  --stage-w: 1280px;
+  --stage-h: 800px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #000;
+  color: #fff;
+  font-family: 'Inter', sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.circle {
+  width: var(--d);
+  height: var(--d);
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow:
+    0 0 calc(var(--d) * 0.26) #2bd96b66,
+    inset 0 calc(var(--d) * -0.043) 0 var(--green-rim);
+}
