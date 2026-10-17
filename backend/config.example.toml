@@ -1,0 +1,6 @@
+share_base_url = "https://photo.example.invalid/p"
+media_dir = "../media"
+
+[camera]
+kind = "ffmpeg"
+device = "Innomaker-U20CAM-1080p-S1"
