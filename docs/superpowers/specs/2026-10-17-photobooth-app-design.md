@@ -45,7 +45,7 @@ The background, prices and hardware reasoning live in the owner's Life repositor
 
 All text is English. One look throughout: a black background with scattered green confetti, one green (placeholder `#2bd96b`), and the main label of each screen as a "slapped-on sticker": a black rectangle with green capitals, a green outline and a hard drop shadow, rotated a few degrees and laid across the element it labels. No other button style exists.
 
-**Idle.** A large round green button in the centre with "TAP HERE" as the sticker across it, and "Take a photo" in small grey text below. The whole circle including the sticker is the touch target; nothing else on the screen reacts to touch except a hidden admin entry (see Settings). The camera is off.
+**Idle.** A large round green button in the centre with "TAP HERE" as the sticker across it, and "Take a photo" in small grey text below. The whole circle including the sticker is the touch target; nothing else on the screen reacts to touch. The camera is off.
 
 **Countdown.** A tap starts a 3 s countdown. The mirrored live preview fills the screen, letterboxed. The green button travels from the centre to the bottom-right corner and shows 3, 2, 1 there, so faces stay clear. The countdown is drawn over the screen only and never appears in recorded media. At zero the screen flashes white and the photo is taken.
 
@@ -87,7 +87,7 @@ A capture's directory is written atomically (files into a temporary directory, m
 
 ## Settings
 
-A configuration file holds the camera source (picamera2, or a webcam by name), the timings above, `share_base_url` and the media directory. An on-screen admin page is not needed in this version; the hidden admin entry on the idle screen only has to exist as a placeholder for later.
+A configuration file holds the camera source (picamera2, or a webcam by name), the timings above, `share_base_url` and the media directory. An on-screen admin page and its hidden entry on the idle screen are left for later, since an entry with nothing behind it would be dead code.
 
 ## How it is built
 
