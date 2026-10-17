@@ -2,10 +2,12 @@ import json
 import logging
 import os
 import shutil
+import types
 from pathlib import Path
 
 import pytest
 
+from photobooth import store as store_module
 from photobooth.store import (
     CLIP,
     META,
@@ -88,6 +90,28 @@ def test_put_file_replaces_atomically(store: CaptureStore, tmp_path: Path):
     assert store.path(capture_id, VIDEO).read_bytes() == b"second"
     assert not first.exists()
     assert not second.exists()
+
+
+def _os_named(name: str) -> types.SimpleNamespace:
+    return types.SimpleNamespace(**{**vars(os), "name": name})
+
+
+@pytest.mark.parametrize(("os_name", "synced"), [("posix", True), ("nt", False)])
+def test_put_file_fsyncs_the_capture_directory_on_posix_only(
+    store: CaptureStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, os_name: str, synced: bool
+):
+    capture_id = store.new_id()
+    store.create(capture_id, b"photo", [b"f"], 10.0)
+    source = tmp_path / "video.mp4"
+    source.write_bytes(b"video")
+    synced_directories: list[Path] = []
+    monkeypatch.setattr(store_module, "_fsync_directory", synced_directories.append)
+    monkeypatch.setattr(store_module, "os", _os_named(os_name))
+
+    store.put_file(capture_id, VIDEO, source)
+
+    assert synced_directories == ([store.root / capture_id] if synced else [])
+    assert store.path(capture_id, VIDEO).read_bytes() == b"video"
 
 
 def _make_id_dir(store: CaptureStore, files: dict[str, bytes]) -> str:

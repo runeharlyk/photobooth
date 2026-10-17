@@ -1,4 +1,5 @@
 import io
+import os
 import subprocess
 from pathlib import Path
 
@@ -209,3 +210,25 @@ def test_failed_rename_raises_media_error_and_removes_part(
         build_boomerang(clip, FPS, 0.5, out)
     assert not out.with_suffix(".part.mp4").exists()
     assert not out.exists()
+
+
+def test_part_file_is_fsynced_before_it_is_renamed(clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    out = tmp_path / "boomerang.mp4"
+    events: list[tuple[str, int]] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def spy_fsync(fd: int) -> None:
+        events.append(("fsync", os.fstat(fd).st_size))
+        real_fsync(fd)
+
+    def spy_replace(src, dst) -> None:
+        events.append(("replace", Path(src).stat().st_size))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    build_boomerang(clip, FPS, 0.5, out)
+
+    assert [name for name, _ in events] == ["fsync", "replace"]
+    assert events[0][1] == events[1][1] > 0

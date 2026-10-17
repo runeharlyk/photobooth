@@ -73,7 +73,10 @@ class CaptureStore:
             _fsync_directory(self.root)
 
     def put_file(self, capture_id: str, name: str, source: Path) -> None:
-        os.replace(source, self.path(capture_id, name))
+        target = self.path(capture_id, name)
+        os.replace(source, target)
+        if os.name == "posix":
+            _fsync_directory(target.parent)
 
     def path(self, capture_id: str, name: str) -> Path:
         return self._dir(capture_id) / name

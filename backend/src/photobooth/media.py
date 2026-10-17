@@ -85,7 +85,13 @@ def _render(inputs: list[str], graph: str, fps: float, out: Path) -> None:
         tail = result.stderr.decode("utf-8", errors="replace")[-_STDERR_TAIL_CHARS:]
         raise MediaError(f"ffmpeg exited with {result.returncode}: {tail}")
     try:
+        _fsync_file(part)
         os.replace(part, out)
     except OSError as error:
         part.unlink(missing_ok=True)
         raise MediaError(f"could not write {out.name}: {error}") from error
+
+
+def _fsync_file(path: Path) -> None:
+    with path.open("r+b") as file:
+        os.fsync(file.fileno())
