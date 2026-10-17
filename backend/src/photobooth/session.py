@@ -275,6 +275,11 @@ class Booth:
                     await self._build_file(capture_id, scratch / VIDEO, "video_ready", video)
         except OSError:
             logger.exception("could not store media for capture %s", capture_id)
+        await self._prune_clips()
+
+    async def _prune_clips(self) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._store.prune_clips)
 
     async def _build_file(self, capture_id: str, out: Path, flag: str, build: Callable[[], None]) -> None:
         try:

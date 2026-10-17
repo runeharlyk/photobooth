@@ -23,6 +23,7 @@ def main() -> None:
 
     store = CaptureStore(config.media_dir)
     store.recover()
+    store.prune_clips()
     camera = make_camera(config.camera)
     booth = Booth(camera, store, config.timings)
     frontend_dir = WEB_DIR if WEB_DIR.is_dir() else None

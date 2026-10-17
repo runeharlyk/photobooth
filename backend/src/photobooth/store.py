@@ -16,6 +16,7 @@ BOOMERANG = "boomerang.mp4"
 VIDEO = "video.mp4"
 META = "capture.json"
 PUBLIC_FILES = (PHOTO, BOOMERANG, VIDEO)
+CLIP_KEEP_FREE_BYTES = 5 * 1024**3
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,47 @@ class CaptureStore:
                 self._recover_entry(entry)
             except OSError:
                 logger.warning("could not recover %s", entry.name, exc_info=True)
+
+    def prune_clips(self, min_free_bytes: int = CLIP_KEEP_FREE_BYTES) -> list[str]:
+        pruned: list[str] = []
+        if not self._short_of_space(min_free_bytes):
+            return pruned
+        for capture_id in self._prunable_clips_oldest_first():
+            try:
+                self.path(capture_id, CLIP).unlink()
+            except OSError:
+                logger.warning("could not delete the clip of %s", capture_id, exc_info=True)
+                continue
+            logger.info("deleted the clip of %s to free disk space", capture_id)
+            pruned.append(capture_id)
+            if not self._short_of_space(min_free_bytes):
+                break
+        return pruned
+
+    def _short_of_space(self, min_free_bytes: int) -> bool:
+        try:
+            return shutil.disk_usage(self.root).free < min_free_bytes
+        except OSError:
+            logger.exception("could not measure free space in %s", self.root)
+            return False
+
+    def _prunable_clips_oldest_first(self) -> list[str]:
+        try:
+            entries = list(self.root.iterdir())
+        except OSError:
+            logger.exception("could not list media directory %s", self.root)
+            return []
+        prunable: list[tuple[str, str]] = []
+        for entry in entries:
+            if not (entry.is_dir() and _ID_PATTERN.fullmatch(entry.name)):
+                continue
+            if not all((entry / name).is_file() for name in (CLIP, BOOMERANG, VIDEO)):
+                continue
+            try:
+                prunable.append((self.meta(entry.name).captured_at, entry.name))
+            except (OSError, ValueError, KeyError, TypeError):
+                logger.warning("could not read %s while pruning clips", entry.name, exc_info=True)
+        return [capture_id for _, capture_id in sorted(prunable)]
 
     def _recover_entry(self, entry: Path) -> None:
         if not entry.is_dir():

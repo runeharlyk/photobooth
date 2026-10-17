@@ -314,6 +314,38 @@ async def test_builds_run_one_capture_at_a_time_in_capture_order(
         assert store.path(capture_id, VIDEO).stat().st_size > 0
 
 
+async def test_clip_is_pruned_once_its_media_are_built_and_space_is_short(
+    booth, store, await_screen, await_state, monkeypatch
+):
+    real_disk_usage = shutil.disk_usage
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: real_disk_usage(path)._replace(free=1024 * MEGABYTE))
+    await booth.tap()
+    result = await await_screen(booth, Screen.RESULT)
+    await await_state(booth, lambda state: state.boomerang_ready and state.video_ready, 10)
+    await booth.close()
+
+    assert not store.path(result.capture_id, CLIP).exists()
+    for name in (PHOTO, BOOMERANG, VIDEO):
+        assert store.path(result.capture_id, name).stat().st_size > 0
+
+
+async def test_clip_is_kept_while_the_media_are_building(
+    booth, store, await_screen, boomerang_gate, monkeypatch
+):
+    building, release = boomerang_gate
+    real_disk_usage = shutil.disk_usage
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: real_disk_usage(path)._replace(free=1024 * MEGABYTE))
+    await booth.tap()
+    result = await await_screen(booth, Screen.RESULT)
+    assert await asyncio.to_thread(building.wait, 10)
+    await await_screen(booth, Screen.IDLE)
+
+    assert store.path(result.capture_id, CLIP).exists()
+    release.set()
+    await booth.close()
+    assert not store.path(result.capture_id, CLIP).exists()
+
+
 async def test_media_finished_after_the_result_screen_leaves_flags_alone(booth, store, await_screen, boomerang_gate):
     building, release = boomerang_gate
     await booth.tap()

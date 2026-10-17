@@ -9,7 +9,9 @@ import pytest
 
 from photobooth import store as store_module
 from photobooth.store import (
+    BOOMERANG,
     CLIP,
+    CLIP_KEEP_FREE_BYTES,
     META,
     PHOTO,
     VIDEO,
@@ -242,3 +244,149 @@ def test_recover_continues_when_removal_fails(
     assert stuck.exists()
     assert store.meta(pending_id).state == CaptureState.KEPT
     assert ".tmp-stuck" in caplog.text
+
+
+CLIP_BYTES = 1000
+THRESHOLD = 10_000
+
+
+def _capture(
+    store: CaptureStore, captured_at: str, built: tuple[str, ...] = (BOOMERANG, VIDEO)
+) -> str:
+    capture_id = store.new_id()
+    store.create(capture_id, b"photo", [b"c" * CLIP_BYTES], 10.0)
+    meta_path = store.path(capture_id, META)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["captured_at"] = captured_at
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    for name in built:
+        store.path(capture_id, name).write_bytes(b"media")
+    return capture_id
+
+
+def _clip_bytes(store: CaptureStore) -> int:
+    return sum(path.stat().st_size for path in store.root.glob(f"*/{CLIP}"))
+
+
+def _free_space(store: CaptureStore, monkeypatch: pytest.MonkeyPatch, free: int) -> None:
+    """Reports `free` bytes now and one more byte for every clip byte deleted since."""
+    initial = _clip_bytes(store)
+    real_disk_usage = shutil.disk_usage
+    monkeypatch.setattr(
+        shutil,
+        "disk_usage",
+        lambda path: real_disk_usage(path)._replace(free=free + initial - _clip_bytes(store)),
+    )
+
+
+def test_prune_deletes_the_oldest_clip_first_by_capture_time(
+    store: CaptureStore, monkeypatch: pytest.MonkeyPatch
+):
+    middle = _capture(store, "2026-10-02T10:00:00+00:00")
+    oldest = _capture(store, "2026-10-01T10:00:00+00:00")
+    newest = _capture(store, "2026-10-03T10:00:00+00:00")
+    _free_space(store, monkeypatch, THRESHOLD - CLIP_BYTES // 2)
+
+    assert store.prune_clips(THRESHOLD) == [oldest]
+
+    assert not store.path(oldest, CLIP).exists()
+    assert store.path(middle, CLIP).exists()
+    assert store.path(newest, CLIP).exists()
+
+
+def test_prune_never_touches_photo_boomerang_video_or_metadata(
+    store: CaptureStore, monkeypatch: pytest.MonkeyPatch
+):
+    capture_id = _capture(store, "2026-10-01T10:00:00+00:00")
+    _free_space(store, monkeypatch, THRESHOLD - 1)
+
+    assert store.prune_clips(THRESHOLD) == [capture_id]
+
+    assert store.path(capture_id, PHOTO).read_bytes() == b"photo"
+    assert store.path(capture_id, BOOMERANG).read_bytes() == b"media"
+    assert store.path(capture_id, VIDEO).read_bytes() == b"media"
+    assert store.meta(capture_id).id == capture_id
+
+
+def test_prune_stops_as_soon_as_enough_is_free(store: CaptureStore, monkeypatch: pytest.MonkeyPatch):
+    ids = [_capture(store, f"2026-10-0{day}T10:00:00+00:00") for day in (1, 2, 3, 4)]
+    _free_space(store, monkeypatch, THRESHOLD - 2 * CLIP_BYTES)
+
+    assert store.prune_clips(THRESHOLD) == ids[:2]
+
+    assert [store.path(capture_id, CLIP).exists() for capture_id in ids] == [False, False, True, True]
+
+
+def test_prune_leaves_everything_when_free_space_is_sufficient(
+    store: CaptureStore, monkeypatch: pytest.MonkeyPatch
+):
+    ids = [_capture(store, f"2026-10-0{day}T10:00:00+00:00") for day in (1, 2)]
+    _free_space(store, monkeypatch, THRESHOLD)
+
+    assert store.prune_clips(THRESHOLD) == []
+
+    assert all(store.path(capture_id, CLIP).exists() for capture_id in ids)
+
+
+@pytest.mark.parametrize("built", [(BOOMERANG,), (VIDEO,), ()], ids=["no-video", "no-boomerang", "neither"])
+def test_prune_never_deletes_a_clip_whose_media_are_not_built(
+    store: CaptureStore, monkeypatch: pytest.MonkeyPatch, built: tuple[str, ...]
+):
+    unbuilt = _capture(store, "2026-10-01T10:00:00+00:00", built)
+    built_id = _capture(store, "2026-10-02T10:00:00+00:00")
+    _free_space(store, monkeypatch, 0)
+
+    assert store.prune_clips(THRESHOLD) == [built_id]
+
+    assert store.path(unbuilt, CLIP).exists()
+
+
+def test_prune_gives_up_when_no_clip_is_eligible(store: CaptureStore, monkeypatch: pytest.MonkeyPatch):
+    unbuilt = _capture(store, "2026-10-01T10:00:00+00:00", ())
+    _free_space(store, monkeypatch, 0)
+
+    assert store.prune_clips(THRESHOLD) == []
+
+    assert store.path(unbuilt, CLIP).exists()
+
+
+def test_prune_skips_unreadable_captures(
+    store: CaptureStore, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    broken = _capture(store, "2026-10-01T10:00:00+00:00")
+    store.path(broken, META).write_text('{"id": "trunc', encoding="utf-8")
+    readable = _capture(store, "2026-10-02T10:00:00+00:00")
+    _free_space(store, monkeypatch, 0)
+
+    with caplog.at_level(logging.WARNING, logger="photobooth.store"):
+        assert store.prune_clips(THRESHOLD) == [readable]
+
+    assert store.path(broken, CLIP).exists()
+    assert broken in caplog.text
+
+
+def test_prune_logs_each_deletion(
+    store: CaptureStore, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    ids = [_capture(store, f"2026-10-0{day}T10:00:00+00:00") for day in (1, 2)]
+    _free_space(store, monkeypatch, 0)
+
+    with caplog.at_level(logging.INFO, logger="photobooth.store"):
+        store.prune_clips(THRESHOLD)
+
+    messages = [record.getMessage() for record in caplog.records if record.levelno == logging.INFO]
+    assert [any(capture_id in message for message in messages) for capture_id in ids] == [True, True]
+
+
+def test_prune_defaults_to_five_gigabytes_free(store: CaptureStore, monkeypatch: pytest.MonkeyPatch):
+    assert CLIP_KEEP_FREE_BYTES == 5 * 1024**3
+    capture_id = _capture(store, "2026-10-01T10:00:00+00:00")
+    _free_space(store, monkeypatch, CLIP_KEEP_FREE_BYTES - 1)
+
+    assert store.prune_clips() == [capture_id]
+
+
+def test_prune_returns_nothing_when_the_media_directory_is_unusable(store: CaptureStore):
+    shutil.rmtree(store.root)
+
+    assert store.prune_clips(THRESHOLD) == []
