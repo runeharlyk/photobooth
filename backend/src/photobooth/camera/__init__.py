@@ -113,6 +113,10 @@ def make_camera(config: CameraConfig) -> Camera:
         from photobooth.camera.fake import FakeCamera
 
         return FakeCamera()
+    if config.kind == "picamera2":
+        from photobooth.camera.picamera2 import Picamera2Camera
+
+        return Picamera2Camera()
     from photobooth.camera.ffmpeg import FfmpegCamera
 
     return FfmpegCamera(config)

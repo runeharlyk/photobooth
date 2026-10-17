@@ -1,0 +1,5 @@
+share_base_url = "https://photo.example.invalid/p"
+media_dir = "../media"
+
+[camera]
+kind = "picamera2"

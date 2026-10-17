@@ -6,7 +6,7 @@ from typing import Literal
 
 @dataclass(frozen=True)
 class CameraConfig:
-    kind: Literal["fake", "ffmpeg"]
+    kind: Literal["fake", "ffmpeg", "picamera2"]
     device: str = ""
     input_format: str = "dshow"
     video_size: str = "1920x1080"
