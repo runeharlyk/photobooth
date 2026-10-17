@@ -8,7 +8,7 @@
   let sending = $state(false)
 
   async function press() {
-    if (sending || fault) return
+    if (sending) return
     sending = true
     await tap()
     sending = false
@@ -17,10 +17,10 @@
 
 <div class="idle">
   <Confetti opacity={0.85} />
-  <button class="tap circle" class:inert={fault} style:--d="calc(var(--idle-d) * 1px)" onclick={press}>
+  <button class="tap circle" class:inert={fault} aria-disabled={!!fault} style:--d="calc(var(--idle-d) * 1px)" onclick={press}>
     <span class="label"><Sticker tilt={-7} size={67} border={7} shadow={[8, 10]}>TAP HERE</Sticker></span>
   </button>
-  <p class:alert={fault || message}>{fault ?? message ?? 'Take a photo'}</p>
+  <p>{fault ?? message ?? 'Take a photo'}</p>
 </div>
 
 <style>
@@ -41,7 +41,7 @@
       opacity 200ms;
   }
 
-  .tap:active {
+  .tap:not(.inert):active {
     transform: scale(0.94);
   }
 
@@ -62,10 +62,6 @@
     color: var(--muted);
     font-size: 34px;
     line-height: calc(var(--idle-help) * 1px);
-  }
-
-  p.alert {
-    color: #fff;
-    font-weight: 800;
+    text-align: center;
   }
 </style>
