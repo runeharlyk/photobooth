@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -167,3 +169,52 @@ def test_keep_fsyncs_metadata_before_replacing_it(
     store.keep(capture_id)
 
     assert events == ["fsync", "replace"]
+
+
+def test_recover_leaves_capture_with_transiently_unreadable_metadata(
+    store: CaptureStore, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    locked_id = store.new_id()
+    store.create(locked_id, b"photo", [b"f"], 10.0)
+    pending_id = store.new_id()
+    store.create(pending_id, b"photo", [b"f"], 10.0)
+    real_meta = store.meta
+
+    def locked_meta(capture_id: str):
+        if capture_id == locked_id:
+            raise PermissionError("held by another process")
+        return real_meta(capture_id)
+
+    monkeypatch.setattr(store, "meta", locked_meta)
+
+    with caplog.at_level(logging.WARNING, logger="photobooth.store"):
+        store.recover()
+
+    assert store.path(locked_id, PHOTO).read_bytes() == b"photo"
+    assert store.path(locked_id, CLIP).read_bytes() == b"f"
+    assert real_meta(pending_id).state == CaptureState.KEPT
+    assert locked_id in caplog.text
+
+
+def test_recover_continues_when_removal_fails(
+    store: CaptureStore, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    stuck = store.root / ".tmp-stuck"
+    stuck.mkdir()
+    pending_id = store.new_id()
+    store.create(pending_id, b"photo", [b"f"], 10.0)
+    real_rmtree = shutil.rmtree
+
+    def failing_rmtree(path, *args, **kwargs):
+        if Path(path) == stuck:
+            raise PermissionError("held by another process")
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", failing_rmtree)
+
+    with caplog.at_level(logging.WARNING, logger="photobooth.store"):
+        store.recover()
+
+    assert stuck.exists()
+    assert store.meta(pending_id).state == CaptureState.KEPT
+    assert ".tmp-stuck" in caplog.text

@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import secrets
@@ -15,6 +16,8 @@ BOOMERANG = "boomerang.mp4"
 VIDEO = "video.mp4"
 META = "capture.json"
 PUBLIC_FILES = (PHOTO, BOOMERANG, VIDEO)
+
+logger = logging.getLogger(__name__)
 
 _TMP_PREFIX = ".tmp-"
 _ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{22}")
@@ -95,19 +98,25 @@ class CaptureStore:
         shutil.rmtree(doomed)
 
     def recover(self) -> None:
-        for entry in self.root.iterdir():
-            if not entry.is_dir():
-                continue
-            if entry.name.startswith(_TMP_PREFIX):
+        for entry in list(self.root.iterdir()):
+            try:
+                self._recover_entry(entry)
+            except OSError:
+                logger.warning("could not recover %s", entry.name, exc_info=True)
+
+    def _recover_entry(self, entry: Path) -> None:
+        if not entry.is_dir():
+            return
+        if entry.name.startswith(_TMP_PREFIX):
+            shutil.rmtree(entry)
+        elif _ID_PATTERN.fullmatch(entry.name):
+            try:
+                pending = self.meta(entry.name).state == CaptureState.PENDING
+            except (FileNotFoundError, ValueError, KeyError, TypeError):
                 shutil.rmtree(entry)
-            elif _ID_PATTERN.fullmatch(entry.name):
-                try:
-                    pending = self.meta(entry.name).state == CaptureState.PENDING
-                except (OSError, ValueError, KeyError, TypeError):
-                    shutil.rmtree(entry)
-                    continue
-                if pending:
-                    self.keep(entry.name)
+                return
+            if pending:
+                self.keep(entry.name)
 
     def _dir(self, capture_id: str) -> Path:
         if not _ID_PATTERN.fullmatch(capture_id):
