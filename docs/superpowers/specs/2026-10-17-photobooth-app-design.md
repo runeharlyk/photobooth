@@ -54,6 +54,8 @@ Delete is available for 15 s after the shot, the owner's choice: the Photos Libr
 When the 15 s pass, the Delete button disappears and the capture becomes kept; the result screen stays until its timeout (placeholder 45 s) or New photo, then returns to idle.
 Delete removes the photo, boomerang and video and returns to idle. New photo makes the current capture kept at once and starts a new countdown.
 
+**Starting.** While the page has no connection to the backend, before the first state arrives or after the connection drops, it shows the confetti and "Starting up..." in the grey helper style, with no button and nothing from an earlier capture; it returns to the current screen by itself once the backend answers.
+
 ## Capture
 
 1. The tap turns the camera on and starts the live preview.
@@ -76,7 +78,7 @@ The QR code encodes `{share_base_url}/{id}`, built locally the instant the resul
 
 ## Failures
 
-The booth is unattended, so a failure must be visible on the screen rather than only in a log, without adding a fourth screen or a second visual style (designer's call).
+The booth is unattended, so a failure must be visible on the screen rather than only in a log, without a second visual style (designer's call); the Starting view covers the backend being unreachable.
 - A capture that fails (camera does not open, the photo is not written) returns to idle with a one-line message in the small grey helper-text style in place of "Take a photo", such as "Something went wrong - try again", for a few seconds.
 - A boomerang or video that fails to build leaves the photo and the QR link intact; the failure is logged and the result screen keeps showing the still.
 - A lasting fault (no camera at startup, media directory not writable or full) replaces "Take a photo" on the idle screen with a short grey line naming it, and the button stays inert.
