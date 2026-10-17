@@ -14,9 +14,17 @@ export interface BoothState {
   share_url: string | null
 }
 
+/** The latest booth state, or null while the backend is unreachable. */
 export const booth = readable<BoothState | null>(null, (set) => {
   const source = new EventSource('/api/events')
-  source.onmessage = (event) => set(JSON.parse(event.data))
+  source.onmessage = (event) => {
+    try {
+      set(JSON.parse(event.data))
+    } catch (error) {
+      console.warn('Ignoring malformed state message', error)
+    }
+  }
+  source.onerror = () => set(null)
   return () => source.close()
 })
 

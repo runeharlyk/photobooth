@@ -20,7 +20,7 @@
   <button class="tap circle" class:inert={fault} aria-disabled={!!fault} style:--d="calc(var(--idle-d) * 1px)" onclick={press}>
     <span class="label"><Sticker tilt={-7} size={67} border={7} shadow={[8, 10]}>TAP HERE</Sticker></span>
   </button>
-  <p>{fault ?? message ?? 'Take a photo'}</p>
+  <p class="helper">{fault ?? message ?? 'Take a photo'}</p>
 </div>
 
 <style>
@@ -54,14 +54,5 @@
     left: 50%;
     top: 50%;
     translate: -50% -50%;
-  }
-
-  p {
-    position: relative;
-    margin: 0;
-    color: var(--muted);
-    font-size: 34px;
-    line-height: calc(var(--idle-help) * 1px);
-    text-align: center;
   }
 </style>

@@ -53,3 +53,12 @@ button {
     0 0 calc(var(--d) * 0.26) #2bd96b66,
     inset 0 calc(var(--d) * -0.043) 0 var(--green-rim);
 }
+
+.helper {
+  position: relative;
+  margin: 0;
+  color: var(--muted);
+  font-size: 34px;
+  line-height: calc(var(--idle-help) * 1px);
+  text-align: center;
+}

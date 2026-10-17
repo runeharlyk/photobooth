@@ -4,6 +4,7 @@
   import Countdown from './screens/Countdown.svelte'
   import Idle from './screens/Idle.svelte'
   import Result from './screens/Result.svelte'
+  import Starting from './screens/Starting.svelte'
 
   let innerWidth = $state(1)
   let innerHeight = $state(1)
@@ -27,6 +28,8 @@
     {#if $booth.screen === 'capturing'}
       <div class="flash" out:fade={{ duration: 300 }}></div>
     {/if}
+  {:else}
+    <Starting />
   {/if}
 </main>
 
