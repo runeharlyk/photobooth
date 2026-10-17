@@ -5,15 +5,17 @@
   import Idle from './screens/Idle.svelte'
   import Result from './screens/Result.svelte'
 
-  let innerWidth = $state(1280)
-  let innerHeight = $state(800)
+  let innerWidth = $state(1)
+  let innerHeight = $state(1)
+  let stageWidth = $state(1)
+  let stageHeight = $state(1)
 
-  const scale = $derived(Math.min(innerWidth / 1280, innerHeight / 800))
+  const scale = $derived(Math.min(innerWidth / stageWidth, innerHeight / stageHeight))
 </script>
 
 <svelte:window bind:innerWidth bind:innerHeight />
 
-<main style:scale>
+<main style:scale bind:clientWidth={stageWidth} bind:clientHeight={stageHeight}>
   {#if $booth}
     {#if $booth.screen === 'idle'}
       <Idle message={$booth.message} fault={$booth.fault} />
@@ -31,10 +33,10 @@
 <style>
   main {
     position: absolute;
-    left: calc(50% - var(--stage-w) / 2);
-    top: calc(50% - var(--stage-h) / 2);
-    width: var(--stage-w);
-    height: var(--stage-h);
+    left: calc(50% - var(--stage-w) * 0.5px);
+    top: calc(50% - var(--stage-h) * 0.5px);
+    width: calc(var(--stage-w) * 1px);
+    height: calc(var(--stage-h) * 1px);
     overflow: hidden;
   }
 

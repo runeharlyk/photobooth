@@ -6,8 +6,13 @@
   --green: #2bd96b;
   --green-rim: #1fa652;
   --muted: #bbb;
-  --stage-w: 1280px;
-  --stage-h: 800px;
+  --stage-w: 1280;
+  --stage-h: 800;
+  --idle-d: 386;
+  --idle-gap: 50;
+  --idle-help: 41;
+  --corner-d: 160;
+  --corner-inset: 38;
 }
 
 *,

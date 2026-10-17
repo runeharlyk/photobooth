@@ -17,7 +17,7 @@
     {/if}
   </div>
   <div class="side">
-    <div class="scan"><Sticker tilt={-5} size={22}>SCAN TO GET YOUR PHOTO</Sticker></div>
+    <div class="scan"><Sticker tilt={-5} size={24}>SCAN TO GET YOUR PHOTO</Sticker></div>
     <img class="qr" src="/api/captures/{state.capture_id}/qr.svg" alt="" />
     <div class="actions">
       {#if state.delete_available}
@@ -37,14 +37,13 @@
   .print {
     position: absolute;
     left: 4%;
-    top: 50%;
-    width: 56%;
+    top: 13%;
+    width: 58%;
     display: grid;
-    translate: 0 -50%;
     rotate: -2deg;
-    border: 8px solid #fff;
+    border: 12px solid #fff;
     background: #000;
-    box-shadow: 8px 10px 0 #0009;
+    box-shadow: 12px 16px 0 #0009;
   }
 
   .print > * {
@@ -57,10 +56,10 @@
 
   .side {
     position: absolute;
-    right: 4%;
-    top: 0;
-    bottom: 0;
-    width: 30%;
+    right: 5%;
+    top: 10%;
+    bottom: 10%;
+    width: 27%;
     display: flex;
     flex-direction: column;
     justify-content: center;
@@ -69,7 +68,7 @@
 
   .scan {
     align-self: center;
-    margin-bottom: -34px;
+    margin-bottom: -24px;
     z-index: 1;
   }
 
@@ -77,21 +76,21 @@
     display: block;
     width: 100%;
     aspect-ratio: 1;
-    border: 8px solid #fff;
+    border: 16px solid #fff;
     background: #fff;
   }
 
   .actions {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 14px;
+    gap: 16px;
   }
 
   button {
     grid-column: 2;
-    padding: 16px 0;
+    padding: 17px 0;
     border-radius: 999px;
-    font-size: 22px;
+    font-size: 23px;
     font-weight: 800;
     transition: transform 80ms ease-out;
   }
@@ -102,13 +101,13 @@
 
   .delete {
     grid-column: 1;
-    border: 2px solid #555;
+    border: 3px solid #555;
     color: var(--muted);
   }
 
   .new {
     background: var(--green);
-    box-shadow: 0 0 18px #2bd96b55;
+    box-shadow: 0 0 28px #2bd96b55;
     color: #000;
   }
 </style>

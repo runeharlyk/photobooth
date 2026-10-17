@@ -11,9 +11,9 @@
     display: inline-block;
     transform: rotate(var(--tilt));
     padding: 0.2em 0.6em;
-    border: 4px solid var(--green);
+    border: 0.12em solid var(--green);
     background: #111;
-    box-shadow: 5px 6px 0 #0008;
+    box-shadow: 0.15em 0.18em 0 #0008;
     color: var(--green);
     font-family: 'Archivo Black', sans-serif;
     font-size: var(--size);

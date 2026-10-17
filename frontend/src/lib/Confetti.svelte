@@ -32,8 +32,8 @@
 
   span {
     position: absolute;
-    width: 20px;
-    height: 7px;
+    width: 24px;
+    height: 8px;
     border-radius: 3px;
     background: var(--green);
   }

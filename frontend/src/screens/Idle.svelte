@@ -17,8 +17,8 @@
 
 <div class="idle">
   <Confetti opacity={0.85} />
-  <button class="tap circle" class:inert={fault} style:--d="230px" onclick={press}>
-    <span class="label"><Sticker tilt={-7} size={40}>TAP HERE</Sticker></span>
+  <button class="tap circle" class:inert={fault} style:--d="calc(var(--idle-d) * 1px)" onclick={press}>
+    <span class="label"><Sticker tilt={-7} size={67}>TAP HERE</Sticker></span>
   </button>
   <p class:alert={fault || message}>{fault ?? message ?? 'Take a photo'}</p>
 </div>
@@ -27,12 +27,15 @@
   .idle {
     position: absolute;
     inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: calc(var(--idle-gap) * 1px);
   }
 
   .tap {
-    position: absolute;
-    left: calc(50% - 115px);
-    top: calc(50% - 115px);
+    position: relative;
     transition:
       transform 80ms ease-out,
       opacity 200ms;
@@ -54,14 +57,11 @@
   }
 
   p {
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: calc(50% + 115px + 36px);
+    position: relative;
     margin: 0;
-    text-align: center;
     color: var(--muted);
-    font-size: 28px;
+    font-size: 34px;
+    line-height: calc(var(--idle-help) * 1px);
   }
 
   p.alert {

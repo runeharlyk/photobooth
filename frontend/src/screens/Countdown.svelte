@@ -6,11 +6,15 @@
 
 <div class="countdown">
   <img src={preview} alt="" />
-  <div class="corner circle" style:--d="92px" aria-live="polite">{remaining ?? ''}</div>
+  <div class="corner circle" style:--d="calc(var(--corner-d) * 1px)" aria-live="polite">{remaining ?? ''}</div>
 </div>
 
 <style>
   .countdown {
+    --idle-centre-y: calc((var(--stage-h) - var(--idle-gap) - var(--idle-help)) / 2);
+    --corner-centre-x: calc(var(--stage-w) - var(--corner-inset) - var(--corner-d) / 2);
+    --corner-centre-y: calc(var(--stage-h) - var(--corner-inset) - var(--corner-d) / 2);
+
     position: absolute;
     inset: 0;
   }
@@ -24,8 +28,8 @@
 
   .corner {
     position: absolute;
-    right: 22px;
-    bottom: 22px;
+    right: calc(var(--corner-inset) * 1px);
+    bottom: calc(var(--corner-inset) * 1px);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -37,7 +41,11 @@
 
   @keyframes travel {
     from {
-      transform: translate(-572px, -332px) scale(2.5);
+      transform: translate(
+          calc((var(--stage-w) / 2 - var(--corner-centre-x)) * 1px),
+          calc((var(--idle-centre-y) - var(--corner-centre-y)) * 1px)
+        )
+        scale(calc(var(--idle-d) / var(--corner-d)));
     }
   }
 
