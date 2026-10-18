@@ -458,3 +458,26 @@ def test_prune_deletes_the_clip_of_a_capture_made_before_events(
     _free_space(store, monkeypatch, 0)
 
     assert store.prune_clips(THRESHOLD) == [capture_id]
+
+
+def test_keep_preserves_a_non_default_event(store: CaptureStore):
+    capture_id = store.new_id()
+    store.create(capture_id, b"photo", [b"f"], 10.0, "party")
+
+    store.keep(capture_id)
+
+    assert store.meta(capture_id).state == CaptureState.KEPT
+    assert store.meta(capture_id).event == "party"
+    stored = json.loads(store.path(capture_id, META).read_text(encoding="utf-8"))
+    assert stored["event"] == "party"
+
+
+def test_recover_keeps_a_pending_capture_with_its_non_default_event(store: CaptureStore):
+    capture_id = store.new_id()
+    store.create(capture_id, b"photo", [b"f"], 10.0, "party")
+
+    store.recover()
+
+    assert store.meta(capture_id).state == CaptureState.KEPT
+    stored = json.loads(store.path(capture_id, META).read_text(encoding="utf-8"))
+    assert stored["event"] == "party"
