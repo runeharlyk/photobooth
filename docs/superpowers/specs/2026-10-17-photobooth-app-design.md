@@ -94,6 +94,10 @@ A configuration file holds the camera source (picamera2, or a webcam by name), t
 
 Settings are edited from elsewhere, not at the booth (the owner's requirement). The local file may name a `remote_config_url`, by default the raw URL of a secret GitHub Gist the owner edits from any device. The booth re-reads the local file and fetches the remote one about once a minute; the remote may set only `share_base_url` and the `[timings]` table, which override the local values. Those apply live, from the next capture onwards, without a restart; the camera, the media directory, the host and the port are read only at startup, and a change to them is logged as needing a restart. An invalid file or an unreachable URL keeps the last good settings, and the last good remote copy is cached on disk so an offline boot still uses it (designer's calls on scope, interval and caching).
 
+## Events
+
+The booth also travels to parties, and photos taken away from the kitchen must never reach the dorm's shared album or its TV (the owner's requirement). A live setting `event` (default `"kitchen"`, editable remotely like the timings) names the occasion, and every capture records the event that was current when it was taken, in its metadata. The later uploader routes each capture by that stamp: only `kitchen` captures go to the kitchen album, every other event to its own destination, decided in the upload milestone. A capture is never re-stamped, so photos queued offline at a party and uploaded at home still go to the party's destination.
+
 ## Updates
 
 The booth updates itself from GitHub releases: a nightly systemd timer at 04:00 runs the latest release's install script, which installs only when a newer release exists and the booth is on its idle screen, so an update never interrupts a guest (designer's call on the time and the idle rule).
