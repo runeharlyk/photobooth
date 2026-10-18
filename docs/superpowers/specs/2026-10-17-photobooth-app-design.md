@@ -74,7 +74,16 @@ Each capture gets a random, unguessable id at the moment of the shot. Its files 
 The clip is kept only so the boomerang and video can be re-exported if the way they are made changes: clips stay while more than 5 GB is free, and below that the oldest clips are deleted first, never the photo, boomerang or video, and never a clip whose media are not yet built (the owner's rule).
 The state is `pending` while Delete is available and `kept` afterwards, written by the result flow, so the later uploader takes only `kept` captures and never needs to know about screens. A capture found `pending` at startup, after a crash or power cut, becomes `kept`, since the rule is keep unless deleted (designer's call).
 
-The QR code encodes `{share_base_url}/{id}`, built locally the instant the result screen opens; `share_base_url` is configuration. The Cloudflare Worker that will answer that URL, showing "getting your photos ready" until the uploads arrive, is a later milestone. Until it exists the link does not resolve; that is accepted for this version.
+The QR code encodes `{share_base_url}/{id}`, built locally the instant the result screen opens; `share_base_url` is configuration, `https://photo.runeharlyk.dk/p` in production.
+
+## Sharing
+
+The QR link is answered by a Cloudflare Worker on `photo.runeharlyk.dk` (the owner's domain, already on Cloudflare), with the files in a Cloudflare R2 bucket; both are on Cloudflare's free tier.
+- **Guest page** `GET /p/{id}`: until the photo has been uploaded it shows "Getting your photos ready..." and refreshes itself every few seconds; then it shows the photo and offers the photo, boomerang and video for download, each as it becomes available, in the booth's look (black, green, sticker). An id that never arrives keeps the waiting page; there is no listing of captures, and ids stay unguessable.
+- **Booth uploads**: a capture is uploaded once it is `kept` (its 15 s delete window has passed): the photo first, then the boomerang and video as they are built, then a small metadata object carrying the capture time and the event. Uploads are authenticated with a secret token from the booth's local config, retried with backoff while offline, and recorded with the existing `uploaded` marker so a reboot never uploads twice or skips a capture. Deleted captures are never uploaded.
+- **Expiry**: shared files are deleted 30 days after upload by an R2 lifecycle rule (designer's call: guests download on the night), and the page then says the photos have expired.
+- **Events**: the event travels with each upload; the Google Photos kitchen album, which takes only `kitchen` captures, is a later step.
+- The Worker is a separate project in this repository, tested locally with Cloudflare's tooling; only deployment needs the owner's Cloudflare account.
 
 ## Failures
 
