@@ -57,6 +57,10 @@ class Booth:
     _tick and next_frame run unlocked: FrameHub is thread-safe, and no other camera call
     can run during COUNTDOWN. Each countdown takes the timings and event current when it begins and
     keeps them through its capture, so a reload never changes a capture in progress.
+
+    `stored` is set whenever a capture becomes kept, gains a video or finishes its build, and
+    `build_slot` admits one media build at a time; the uploader waits on the first and shares
+    the second, so an upload never competes with an ffmpeg build.
     """
 
     def __init__(self, camera: Camera, store: CaptureStore, settings: LiveSettings) -> None:
@@ -69,7 +73,8 @@ class Booth:
         self._timers: dict[str, asyncio.Task[None]] = {}
         self._countdown: asyncio.Task[None] | None = None
         self._builds: set[asyncio.Task[None]] = set()
-        self._build_slot = asyncio.Semaphore(1)
+        self.build_slot = asyncio.Semaphore(1)
+        self.stored = asyncio.Event()
 
     def subscribe(self) -> asyncio.Queue[BoothState]:
         queue: asyncio.Queue[BoothState] = asyncio.Queue()
@@ -249,6 +254,8 @@ class Booth:
             await asyncio.to_thread(self._store.keep, self.state.capture_id)
         except Exception:
             logger.exception("could not mark capture %s kept", self.state.capture_id)
+        else:
+            self.stored.set()
         self._update(delete_available=False)
 
     async def _time_out(self) -> None:
@@ -263,7 +270,7 @@ class Booth:
         self, capture_id: str, photo: bytes, clip: Sequence[bytes], fps: float, timings: Timings
     ) -> None:
         try:
-            async with self._build_slot:
+            async with self.build_slot:
                 if not self._store.exists(capture_id):
                     return
                 with tempfile.TemporaryDirectory(dir=self._store.root, prefix=_SCRATCH_PREFIX) as name:
@@ -282,7 +289,19 @@ class Booth:
                     await self._build_file(capture_id, scratch / VIDEO, "video_ready", video)
         except OSError:
             logger.exception("could not store media for capture %s", capture_id)
+        await self._finish_build(capture_id)
         await self._prune_clips()
+
+    async def _finish_build(self, capture_id: str) -> None:
+        async with self._lock:
+            if not self._store.exists(capture_id):
+                return
+            try:
+                await asyncio.to_thread(self._store.finish_build, capture_id)
+            except Exception:
+                logger.exception("could not record that the media of capture %s are built", capture_id)
+                return
+            self.stored.set()
 
     async def _prune_clips(self) -> None:
         async with self._lock:
@@ -298,6 +317,7 @@ class Booth:
             if not self._store.exists(capture_id):
                 return
             self._store.put_file(capture_id, out.name, out)
+            self.stored.set()
             if self.state.capture_id == capture_id:
                 self._update(**{flag: True})
 

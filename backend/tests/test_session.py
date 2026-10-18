@@ -12,6 +12,7 @@ from photobooth import session
 from photobooth.camera import CameraError
 from photobooth.camera.fake import FakeCamera
 from photobooth.config import LiveSettings
+from photobooth.media import MediaError
 from photobooth.session import FAILURE_MESSAGE, Booth, BoothState, Screen
 from photobooth.store import BOOMERANG, CLIP, META, PHOTO, VIDEO, CaptureState, CaptureStore
 
@@ -612,3 +613,56 @@ async def test_an_event_change_during_a_countdown_does_not_restamp_that_capture(
     result = await await_screen(booth, Screen.RESULT)
 
     assert store.meta(result.capture_id).event == "kitchen"
+
+
+async def wait_until_set(event: asyncio.Event, timeout: float = 10.0) -> None:
+    async with asyncio.timeout(timeout):
+        await event.wait()
+
+
+async def test_the_build_is_recorded_as_finished_after_both_videos(booth, store, await_screen, boomerang_gate):
+    building, release = boomerang_gate
+    await booth.tap()
+    result = await await_screen(booth, Screen.RESULT)
+    assert await asyncio.to_thread(building.wait, 10)
+    assert store.meta(result.capture_id).build_finished is False
+
+    release.set()
+    await booth.close()
+
+    assert store.meta(result.capture_id).build_finished is True
+    assert store.path(result.capture_id, VIDEO).stat().st_size > 0
+
+
+async def test_a_failed_build_is_recorded_as_finished_without_its_videos(booth, store, await_screen, monkeypatch):
+    def broken(*args):
+        raise MediaError("ffmpeg exited with 1")
+
+    monkeypatch.setattr(session, "build_boomerang", broken)
+    monkeypatch.setattr(session, "build_video", broken)
+    await booth.tap()
+    result = await await_screen(booth, Screen.RESULT)
+
+    await booth.close()
+
+    assert store.meta(result.capture_id).build_finished is True
+    assert not store.path(result.capture_id, BOOMERANG).exists()
+    assert not store.path(result.capture_id, VIDEO).exists()
+
+
+async def test_stored_is_set_when_a_capture_is_kept_and_when_a_video_arrives(
+    booth, store, await_screen, boomerang_gate
+):
+    building, release = boomerang_gate
+    await booth.tap()
+    result = await await_screen(booth, Screen.RESULT)
+    assert await asyncio.to_thread(building.wait, 10)
+    booth.stored.clear()
+
+    await wait_until_set(booth.stored)
+    assert store.meta(result.capture_id).state is CaptureState.KEPT
+
+    booth.stored.clear()
+    release.set()
+    await wait_until_set(booth.stored)
+    assert store.path(result.capture_id, BOOMERANG).is_file()
