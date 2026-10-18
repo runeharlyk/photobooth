@@ -16,6 +16,7 @@ from photobooth.reloader import ConfigReloader
 from photobooth.session import Booth, BoothState, Screen
 from photobooth.sharing import qr_svg, share_url
 from photobooth.store import PUBLIC_FILES, CaptureStore
+from photobooth.uploader import Uploader
 
 PREVIEW_SCREENS = (Screen.COUNTDOWN, Screen.CAPTURING)
 PREVIEW_BOUNDARY = "frame"
@@ -48,16 +49,21 @@ def create_app(
 ) -> FastAPI:
     settings = reloader.settings
     app_version = installed_version()
+    upload = reloader.config.upload
+    uploader = None if upload is None else Uploader(store, upload, booth.build_slot, booth.stored)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await booth.start()
-        reloading = asyncio.create_task(reloader.run())
+        background = {asyncio.create_task(reloader.run())}
+        if uploader is not None:
+            background.add(asyncio.create_task(uploader.run()))
         try:
             yield
         finally:
-            reloading.cancel()
-            await asyncio.wait({reloading})
+            for task in background:
+                task.cancel()
+            await asyncio.wait(background)
             try:
                 await booth.close()
             finally:

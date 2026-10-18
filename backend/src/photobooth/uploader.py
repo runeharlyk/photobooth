@@ -1,0 +1,191 @@
+import asyncio
+import http.client
+import json
+import logging
+import urllib.error
+import urllib.request
+from collections.abc import Callable
+from http import HTTPStatus
+
+from photobooth.config import UploadConfig
+from photobooth.redact import describe_failure, scheme_and_host
+from photobooth.store import BOOMERANG, PHOTO, SHARED_META, VIDEO, VIDEOS, CaptureState, CaptureStore
+
+POLL_S = 30.0
+RETRY_FIRST_S = 5.0
+RETRY_CAP_S = 300.0
+REQUEST_TIMEOUT_S = 30
+USER_AGENT = "photobooth-uploader"
+CONTENT_TYPES = {PHOTO: "image/jpeg", SHARED_META: "application/json", BOOMERANG: "video/mp4", VIDEO: "video/mp4"}
+
+logger = logging.getLogger(__name__)
+
+
+class _Unavailable(Exception):
+    """The Worker could not take the upload now; the message names the failure without secrets."""
+
+
+class _TokenRejected(Exception):
+    pass
+
+
+class Uploader:
+    """Uploads kept captures to the sharing Worker, one file at a time.
+
+    Each pass uploads the photo and meta.json of every due capture, oldest first, before any
+    boomerang or video, so a guest waiting at the booth is not queued behind a backlog of videos;
+    a wake during a pass starts a new one. Progress is recorded per file in the capture's
+    metadata, so a restart resumes where it stopped. A failure to reach the Worker is retried
+    with exponential backoff and logged once until it changes; a rejected token pauses uploads
+    until a restart, since [upload] is read only at startup. Logs name only the Worker's scheme
+    and host, never the token.
+    """
+
+    def __init__(
+        self,
+        store: CaptureStore,
+        config: UploadConfig,
+        slot: asyncio.Semaphore,
+        wake: asyncio.Event,
+        poll_s: float = POLL_S,
+        retry_first_s: float = RETRY_FIRST_S,
+        retry_cap_s: float = RETRY_CAP_S,
+    ) -> None:
+        self._store = store
+        self._config = config
+        self._slot = slot
+        self._wake = wake
+        self._poll_s = poll_s
+        self._retry_first_s = retry_first_s
+        self._retry_cap_s = retry_cap_s
+        self._label = scheme_and_host(config.url)
+        self._failure: str | None = None
+        self._settled: set[str] = set()
+        self._unreadable: set[str] = set()
+
+    async def run(self) -> None:
+        logger.info("uploading kept captures to %s", self._label)
+        retry_s = 0.0
+        while True:
+            self._wake.clear()
+            try:
+                if not await self._upload_due():
+                    continue
+                retry_s = 0.0
+            except _TokenRejected:
+                logger.error("%s rejected the upload token; uploads are paused until a restart", self._label)
+                return
+            except _Unavailable as failure:
+                self._note_failure(str(failure))
+                retry_s = min(self._retry_cap_s, retry_s * 2 or self._retry_first_s)
+            except Exception as error:
+                self._note_failure(f"unexpected error {error!r}", exc_info=True)
+                retry_s = min(self._retry_cap_s, retry_s * 2 or self._retry_first_s)
+            await self._sleep(retry_s or self._poll_s)
+
+    async def _upload_due(self) -> bool:
+        """Uploads every due file; False when woken part-way, so the caller plans again at once."""
+        for index, (capture_id, name) in enumerate(await asyncio.to_thread(self._due)):
+            if index and self._wake.is_set():
+                return False
+            async with self._slot:
+                sent = await asyncio.to_thread(self._upload, capture_id, name)
+            if sent and self._failure is not None:
+                logger.info("uploads to %s resumed", self._label)
+                self._failure = None
+        return True
+
+    async def _sleep(self, seconds: float) -> None:
+        try:
+            async with asyncio.timeout(seconds):
+                await self._wake.wait()
+        except TimeoutError:
+            pass
+
+    def _due(self) -> list[tuple[str, str]]:
+        captures: list[tuple[str, str, list[str]]] = []
+        for capture_id in self._store.capture_ids():
+            if capture_id in self._settled:
+                continue
+            try:
+                meta = self._store.meta(capture_id)
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError, KeyError, TypeError):
+                if capture_id not in self._unreadable:
+                    logger.warning("could not read capture %s to upload it", capture_id, exc_info=True)
+                    self._unreadable.add(capture_id)
+                continue
+            if meta.state is not CaptureState.KEPT:
+                continue
+            names = self._store.unuploaded(meta)
+            if not names and meta.build_finished:
+                self._settled.add(capture_id)
+            captures.append((meta.captured_at, capture_id, names))
+        captures.sort()
+        stills = [(capture_id, name) for _, capture_id, names in captures for name in names if name not in VIDEOS]
+        videos = [(capture_id, name) for _, capture_id, names in captures for name in names if name in VIDEOS]
+        return stills + videos
+
+    def _upload(self, capture_id: str, name: str) -> bool:
+        """Uploads one file and records the outcome; True when the Worker stored it."""
+        try:
+            body = self._body(capture_id, name)
+        except FileNotFoundError:
+            if self._store.exists(capture_id):
+                logger.warning("%s of capture %s is missing; it will not be uploaded", name, capture_id)
+                self._record(self._store.record_upload_failure, capture_id, name)
+            return False
+        status = self._put(capture_id, name, body)
+        if status == HTTPStatus.UNAUTHORIZED:
+            raise _TokenRejected
+        if status == HTTPStatus.BAD_REQUEST:
+            logger.error(
+                "%s rejected %s of capture %s with HTTP 400; it will not be retried", self._label, name, capture_id
+            )
+            self._record(self._store.record_upload_failure, capture_id, name)
+            return False
+        if not 200 <= status < 300:
+            raise _Unavailable(f"HTTP {status}")
+        self._record(self._store.record_upload, capture_id, name)
+        return True
+
+    def _body(self, capture_id: str, name: str) -> bytes:
+        meta = self._store.meta(capture_id)
+        if name == SHARED_META:
+            return json.dumps({"captured_at": meta.captured_at, "event": meta.event}).encode("utf-8")
+        return self._store.path(capture_id, name).read_bytes()
+
+    def _put(self, capture_id: str, name: str, body: bytes) -> int:
+        request = urllib.request.Request(
+            f"{self._config.url}/api/captures/{capture_id}/{name}",
+            data=body,
+            method="PUT",
+            headers={
+                "Authorization": f"Bearer {self._config.token}",
+                "Content-Type": CONTENT_TYPES[name],
+                "User-Agent": USER_AGENT,
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_S) as response:
+                return response.status
+        except urllib.error.HTTPError as error:
+            error.close()
+            return error.code
+        except (OSError, http.client.HTTPException) as error:
+            raise _Unavailable(describe_failure(error)) from None
+
+    @staticmethod
+    def _record(record: Callable[[str, str], None], capture_id: str, name: str) -> None:
+        try:
+            record(capture_id, name)
+        except FileNotFoundError:
+            pass
+
+    def _note_failure(self, failure: str, exc_info: bool = False) -> None:
+        if failure != self._failure:
+            logger.warning(
+                "uploads to %s are failing (%s); retrying with backoff", self._label, failure, exc_info=exc_info
+            )
+        self._failure = failure
