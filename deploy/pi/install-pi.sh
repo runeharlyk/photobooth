@@ -192,11 +192,16 @@ prune_venvs() {
 
 write_files() {
   if [ ! -f "$CONFIG" ]; then
-    write_file "$CONFIG" "share_base_url = \"https://photo.example.invalid/p\"
+    write_file "$CONFIG" "share_base_url = \"https://photo.runeharlyk.dk/p\"
 media_dir = \"$MEDIA_DIR\"
 
 [camera]
-kind = \"picamera2\""
+kind = \"picamera2\"
+
+# Uploads to the share Worker; the token is the Worker's UPLOAD_TOKEN secret.
+# [upload]
+# url = \"https://photo.runeharlyk.dk\"
+# token = \"<secret>\""
   fi
 
   write_file "$UNIT" "[Unit]
