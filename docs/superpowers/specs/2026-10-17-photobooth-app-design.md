@@ -97,6 +97,7 @@ Settings are edited from elsewhere, not at the booth (the owner's requirement). 
 ## Updates
 
 The booth updates itself from GitHub releases: a nightly systemd timer at 04:00 runs the latest release's install script, which installs only when a newer release exists and the booth is on its idle screen, so an update never interrupts a guest (designer's call on the time and the idle rule).
+The page reloads itself when it reconnects to a backend of a different version, so the kiosk shows the updated screens without a reboot.
 
 ## How it is built
 

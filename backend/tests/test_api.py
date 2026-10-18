@@ -3,6 +3,7 @@ import json
 import logging
 import socket
 import xml.etree.ElementTree as ET
+from importlib.metadata import version
 from dataclasses import replace
 from pathlib import Path
 
@@ -94,6 +95,11 @@ async def test_events_start_with_current_state(client):
     event = await await_event(client, lambda _: True)
     assert event["screen"] == "idle"
     assert event["share_url"] is None
+
+
+async def test_events_carry_the_installed_version(client):
+    event = await await_event(client, lambda _: True)
+    assert event["version"] == version("photobooth")
 
 
 async def test_tap_to_result_over_http(client):

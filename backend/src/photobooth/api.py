@@ -3,6 +3,7 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -21,6 +22,7 @@ PREVIEW_BOUNDARY = "frame"
 FRAME_WAIT_S = 0.1
 CAMERA_POLL_S = 0.02
 ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+UNINSTALLED_VERSION = "dev"
 
 
 def refuse_cross_site(request: Request) -> None:
@@ -28,6 +30,13 @@ def refuse_cross_site(request: Request) -> None:
     own_origin = f"{request.url.scheme}://{request.url.netloc}"
     if (origin is not None and origin != own_origin) or request.headers.get("sec-fetch-site") == "cross-site":
         raise HTTPException(status_code=403)
+
+
+def installed_version() -> str:
+    try:
+        return version("photobooth")
+    except PackageNotFoundError:
+        return UNINSTALLED_VERSION
 
 
 def create_app(
@@ -38,6 +47,7 @@ def create_app(
     frontend_dir: Path | None,
 ) -> FastAPI:
     settings = reloader.settings
+    app_version = installed_version()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -59,6 +69,7 @@ def create_app(
 
     def event_data(state: BoothState) -> str:
         payload = asdict(state)
+        payload["version"] = app_version
         payload["share_url"] = share_url(settings.share_base_url, state.capture_id) if state.capture_id else None
         return f"data: {json.dumps(payload)}\n\n"
 
