@@ -1,13 +1,21 @@
 import asyncio
+import http.client
 import io
 import json
 import logging
+import select
+import socket
+import struct
+import sys
 import time
-import urllib.error
-import urllib.request
+import urllib.parse
 from collections.abc import Callable
 from http import HTTPStatus
 from typing import BinaryIO
+
+if sys.platform == "linux":
+    import fcntl
+    import termios
 
 from photobooth.config import UploadConfig
 from photobooth.redact import describe_failure, scheme_and_host
@@ -202,25 +210,32 @@ class Uploader:
         return self._store.path(meta.id, name).open("rb")
 
     def _put(self, capture_id: str, name: str, body: BinaryIO) -> int:
-        """Sends the body as a stream: http.client then writes it block by block, each block with
-        its own timeout, where a bytes body is one write whose timeout bounds the whole upload."""
+        """Sends the body as a stream and returns the Worker's status.
+
+        http.client writes a file body block by block, each block with its own timeout, where a bytes
+        body is one write whose timeout bounds the whole upload. After the last write the kernel may
+        still hold megabytes of the body, so the answer is awaited while the Worker keeps acknowledging it.
+        """
         try:
-            request = urllib.request.Request(
-                f"{self._config.url}/api/captures/{capture_id}/{name}",
-                data=body,
-                method="PUT",
-                headers={
-                    "Authorization": f"Bearer {self._config.token}",
-                    "Content-Type": CONTENT_TYPES[name],
-                    "Content-Length": str(_size(body)),
-                    "User-Agent": USER_AGENT,
-                },
-            )
-            with urllib.request.urlopen(request, timeout=self._timeout_s) as response:
-                return response.status
-        except urllib.error.HTTPError as error:
-            error.close()
-            return error.code
+            origin = urllib.parse.urlsplit(self._config.url)
+            connect = http.client.HTTPSConnection if origin.scheme == "https" else http.client.HTTPConnection
+            connection = connect(origin.netloc, timeout=self._timeout_s)
+            try:
+                connection.request(
+                    "PUT",
+                    f"/api/captures/{capture_id}/{name}",
+                    body=body,
+                    headers={
+                        "Authorization": f"Bearer {self._config.token}",
+                        "Content-Type": CONTENT_TYPES[name],
+                        "Content-Length": str(_size(body)),
+                        "User-Agent": USER_AGENT,
+                    },
+                )
+                _await_delivery(connection.sock, self._timeout_s)
+                return connection.getresponse().status
+            finally:
+                connection.close()
         except Exception as error:  # the message may quote the request, its token included
             raise _Unavailable(describe_failure(error)) from None
 
@@ -243,3 +258,26 @@ def _size(body: BinaryIO) -> int:
     size = body.seek(0, io.SEEK_END)
     body.seek(0)
     return size
+
+
+def _await_delivery(sock: socket.socket, timeout_s: float) -> None:
+    """Waits until the peer has acknowledged every byte sent or has begun to answer, failing once
+    timeout_s passes without it acknowledging any. Linux autotunes the send buffer up to megabytes
+    on a slow, buffered uplink, so delivering what it holds can take far longer than one timeout."""
+    pending = _unacknowledged(sock)
+    while pending:
+        readable, _, _ = select.select([sock], [], [], timeout_s)
+        if readable:
+            return
+        left = _unacknowledged(sock)
+        if left >= pending:
+            raise TimeoutError
+        pending = left
+
+
+def _unacknowledged(sock: socket.socket) -> int:
+    """The bytes the kernel holds for the peer, sent or not, that it has not acknowledged (SIOCOUTQ).
+    Only Linux reports them; elsewhere this is 0, and the answer gets one timeout after the last write."""
+    if sys.platform != "linux":
+        return 0
+    return struct.unpack("i", fcntl.ioctl(sock.fileno(), termios.TIOCOUTQ, bytes(4)))[0]

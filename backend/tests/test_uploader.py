@@ -632,17 +632,35 @@ async def test_the_app_does_not_upload_without_an_upload_table(tmp_path, store, 
 async def test_a_large_photo_on_a_slow_uplink_is_sent_in_blocks_each_within_the_timeout(
     store, worker, start_uploader, caplog
 ):
+    """The photo outgrows the kernel's send buffer (4 MiB at most on Linux), so neither one write of the
+    whole body nor the wait for the answer while the kernel delivers what it holds can fit in one timeout."""
     capture_id = kept(store)
-    photo = bytes(range(256)) * (16 * 1024)
+    photo = bytes(range(256)) * (32 * 1024)
     store.path(capture_id, PHOTO).write_bytes(photo)
     worker.read_pace = (64 * 1024, 0.03)
 
     with caplog.at_level(logging.WARNING):
+        started = time.monotonic()
         start_uploader(worker.url, timeout_s=0.5)
         await until(lambda: store.meta(capture_id).uploaded, timeout=20)
 
     assert worker.uploads[0].body == photo
+    assert worker.uploads[0].at - started > 4 * 0.5
     assert at_or_above(caplog, logging.WARNING) == []
+
+
+async def test_an_upload_the_worker_stops_reading_fails_within_the_timeout(store, worker, start_uploader, caplog):
+    capture_id = kept(store)
+    store.path(capture_id, PHOTO).write_bytes(bytes(range(256)) * (4 * 1024))
+    worker.read_pace = (64 * 1024, 5.0)
+
+    with caplog.at_level(logging.WARNING):
+        start_uploader(worker.url, timeout_s=0.5)
+        await until(lambda: at_or_above(caplog, logging.WARNING), timeout=3)
+
+    [warning] = at_or_above(caplog, logging.WARNING)
+    assert "TimeoutError" in warning
+    assert worker.uploads == []
 
 
 @pytest.mark.parametrize("token", [f"{TOKEN}”", f"{TOKEN}\n"], ids=["typographic-quote", "newline"])
