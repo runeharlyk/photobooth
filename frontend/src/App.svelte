@@ -19,7 +19,7 @@
 <main style:scale bind:clientWidth={stageWidth} bind:clientHeight={stageHeight}>
   {#if $booth}
     {#if $booth.screen === 'idle'}
-      <Idle message={$booth.message} fault={$booth.fault} />
+      <Idle message={$booth.message} fault={$booth.fault} notice={$booth.notice} />
     {:else if $booth.screen === 'result'}
       <Result state={$booth} />
     {:else}

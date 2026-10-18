@@ -11,6 +11,7 @@ export interface BoothState {
   video_ready: boolean
   message: string | null
   fault: string | null
+  notice: string | null
   share_url: string | null
   version: string
 }

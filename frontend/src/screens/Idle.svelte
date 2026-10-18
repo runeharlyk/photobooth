@@ -3,7 +3,11 @@
   import Sticker from '../lib/Sticker.svelte'
   import { tap } from '../lib/booth'
 
-  let { message, fault }: { message: string | null; fault: string | null } = $props()
+  let {
+    message,
+    fault,
+    notice,
+  }: { message: string | null; fault: string | null; notice: string | null } = $props()
 
   let sending = $state(false)
 
@@ -20,7 +24,7 @@
   <button class="tap circle" class:inert={fault} aria-disabled={!!fault} style:--d="calc(var(--idle-d) * 1px)" onclick={press}>
     <span class="label"><Sticker tilt={-7} size={67} border={7} shadow={[8, 10]}>TAP HERE</Sticker></span>
   </button>
-  <p class="helper">{fault ?? message ?? 'Take a photo'}</p>
+  <p class="helper">{fault ?? message ?? notice ?? 'Take a photo'}</p>
 </div>
 
 <style>
