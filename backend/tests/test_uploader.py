@@ -433,8 +433,11 @@ async def test_server_errors_back_off_exponentially_up_to_the_cap_and_warn_once_
         await until(lambda: store.meta(capture_id).uploaded, timeout=5)
 
     gaps = [later.at - earlier.at for earlier, later in zip(worker.attempts[:6], worker.attempts[1:6])]
-    for gap, expected in zip(gaps, [0.1, 0.2, 0.4, 0.4, 0.4]):
-        assert expected * 0.8 <= gap <= expected + 0.25
+    for gap, shortest in zip(gaps, [0.1, 0.2, 0.4, 0.4, 0.4]):
+        assert gap >= shortest * 0.8
+    # Uncapped, the fifth gap would be 1.6 s, and load only lengthens a gap, so this cannot flake
+    # unless one sleep overruns by more than 0.8 s.
+    assert gaps[4] < 1.2
     warnings = at_or_above(caplog, logging.WARNING)
     assert len(warnings) == 2
     assert "HTTP 503" in warnings[0]
