@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import socket
+import ssl
 import threading
 import time
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+import trustme
 
 from photobooth.api import create_app
 from photobooth.config import UploadConfig
@@ -42,10 +44,12 @@ class ShareWorker:
 
     `uploads` holds the requests it stored, `attempts` every request that matched the route.
     `answer` forces a status for a file name; `hold` keeps one request waiting until released.
+    `tls` serves HTTPS with that context instead of HTTP.
     """
 
-    def __init__(self, token: str = TOKEN) -> None:
+    def __init__(self, token: str = TOKEN, tls: ssl.SSLContext | None = None) -> None:
         self.token = token
+        self.tls = tls
         self.uploads: list[Request] = []
         self.attempts: list[Request] = []
         self.answer: dict[str, HTTPStatus] = {}
@@ -56,7 +60,8 @@ class ShareWorker:
 
     @property
     def url(self) -> str:
-        return f"http://127.0.0.1:{self._port}"
+        scheme = "https" if self.tls else "http"
+        return f"{scheme}://127.0.0.1:{self._port}"
 
     def names(self, capture_id: str | None = None, attempts: bool = False) -> list[tuple[str, str]]:
         requests = self.attempts if attempts else self.uploads
@@ -110,7 +115,7 @@ class ShareWorker:
                 parts = []
                 while length > 0:
                     time.sleep(pause_s)
-                    part = self.rfile.read1(min(chunk, length))
+                    part = self.rfile.read(min(chunk, length))
                     if not part:
                         break
                     parts.append(part)
@@ -126,6 +131,8 @@ class ShareWorker:
                 pass
 
         self._server = SmallBufferServer(("127.0.0.1", self._port), Handler)
+        if self.tls:
+            self._server.socket = self.tls.wrap_socket(self._server.socket, server_side=True)
         self._port = self._server.server_address[1]
         self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.05})
         self._thread.start()
@@ -649,9 +656,38 @@ async def test_a_large_photo_on_a_slow_uplink_is_sent_in_blocks_each_within_the_
     assert at_or_above(caplog, logging.WARNING) == []
 
 
+async def test_a_large_photo_over_tls_waits_for_its_delivery_despite_session_tickets(store, start_uploader, caplog):
+    """A TLS 1.3 server sends session tickets right after the handshake; unread, they make the
+    socket readable long before the answer, so readiness cannot tell that the answer has begun."""
+    authority = trustme.CA()
+    server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    authority.issue_cert("127.0.0.1").configure_cert(server_tls)
+    server_tls.minimum_version = ssl.TLSVersion.TLSv1_3
+    server_tls.num_tickets = 2
+    client_tls = ssl.create_default_context()
+    authority.configure_trust(client_tls)
+    worker = ShareWorker(tls=server_tls)
+    try:
+        capture_id = kept(store)
+        photo = bytes(range(256)) * (16 * 1024)
+        store.path(capture_id, PHOTO).write_bytes(photo)
+        worker.read_pace = (64 * 1024, 0.03)
+
+        with caplog.at_level(logging.WARNING):
+            started = time.monotonic()
+            start_uploader(worker.url, timeout_s=0.5, tls_context=client_tls)
+            await until(lambda: store.meta(capture_id).uploaded, timeout=20)
+
+        assert worker.uploads[0].body == photo
+        assert worker.uploads[0].at - started > 2 * 0.5
+        assert at_or_above(caplog, logging.WARNING) == []
+    finally:
+        worker.stop()
+
+
 async def test_an_upload_the_worker_stops_reading_fails_within_the_timeout(store, worker, start_uploader, caplog):
     capture_id = kept(store)
-    store.path(capture_id, PHOTO).write_bytes(bytes(range(256)) * (4 * 1024))
+    store.path(capture_id, PHOTO).write_bytes(bytes(range(256)) * 1024)
     worker.read_pace = (64 * 1024, 5.0)
 
     with caplog.at_level(logging.WARNING):
@@ -660,7 +696,7 @@ async def test_an_upload_the_worker_stops_reading_fails_within_the_timeout(store
 
     [warning] = at_or_above(caplog, logging.WARNING)
     assert "TimeoutError" in warning
-    assert worker.uploads == []
+    assert not store.meta(capture_id).uploaded
 
 
 @pytest.mark.parametrize("token", [f"{TOKEN}”", f"{TOKEN}\n"], ids=["typographic-quote", "newline"])

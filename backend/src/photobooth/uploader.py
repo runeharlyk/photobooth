@@ -3,8 +3,8 @@ import http.client
 import io
 import json
 import logging
-import select
 import socket
+import ssl
 import struct
 import sys
 import time
@@ -25,6 +25,7 @@ POLL_S = 30.0
 RETRY_FIRST_S = 5.0
 RETRY_CAP_S = 300.0
 REQUEST_TIMEOUT_S = 30
+DELIVERY_POLL_S = 0.05
 STALL_S = 15 * 60.0
 TOKEN_RETRY_S = 30 * 60.0
 USER_AGENT = "photobooth-uploader"
@@ -58,6 +59,8 @@ class Uploader:
     `on_stalled` is told whether uploads are stalled: the token is rejected, or files have been
     due for stall_s with none uploaded, counting from when they became due or from the last
     successful upload, whichever is later. A successful upload clears it at once.
+
+    `tls_context` replaces the default, verifying TLS context; only tests set it.
     """
 
     def __init__(
@@ -73,6 +76,7 @@ class Uploader:
         timeout_s: float = REQUEST_TIMEOUT_S,
         stall_s: float = STALL_S,
         token_retry_s: float = TOKEN_RETRY_S,
+        tls_context: ssl.SSLContext | None = None,
     ) -> None:
         self._store = store
         self._config = config
@@ -85,6 +89,7 @@ class Uploader:
         self._timeout_s = timeout_s
         self._stall_s = stall_s
         self._token_retry_s = token_retry_s
+        self._tls_context = tls_context or ssl.create_default_context()
         self._label = scheme_and_host(config.url)
         self._failure: str | None = None
         self._waiting_since: float | None = None
@@ -217,9 +222,7 @@ class Uploader:
         still hold megabytes of the body, so the answer is awaited while the Worker keeps acknowledging it.
         """
         try:
-            origin = urllib.parse.urlsplit(self._config.url)
-            connect = http.client.HTTPSConnection if origin.scheme == "https" else http.client.HTTPConnection
-            connection = connect(origin.netloc, timeout=self._timeout_s)
+            connection = self._connect()
             try:
                 connection.request(
                     "PUT",
@@ -238,6 +241,15 @@ class Uploader:
                 connection.close()
         except Exception as error:  # the message may quote the request, its token included
             raise _Unavailable(describe_failure(error)) from None
+
+    def _connect(self) -> http.client.HTTPConnection:
+        """Opens a connection to the Worker; proxy environment variables are not honoured."""
+        origin = urllib.parse.urlsplit(self._config.url)
+        if origin.scheme == "https":
+            return http.client.HTTPSConnection(origin.netloc, timeout=self._timeout_s, context=self._tls_context)
+        if origin.scheme == "http":
+            return http.client.HTTPConnection(origin.netloc, timeout=self._timeout_s)
+        raise ValueError("the upload URL is neither https nor http")
 
     @staticmethod
     def _record(record: Callable[[str, str], None], capture_id: str, name: str) -> None:
@@ -261,17 +273,18 @@ def _size(body: BinaryIO) -> int:
 
 
 def _await_delivery(sock: socket.socket, timeout_s: float) -> None:
-    """Waits until the peer has acknowledged every byte sent or has begun to answer, failing once
-    timeout_s passes without it acknowledging any. Linux autotunes the send buffer up to megabytes
-    on a slow, buffered uplink, so delivering what it holds can take far longer than one timeout."""
+    """Waits until the peer has acknowledged every byte sent, or until timeout_s passes without it
+    acknowledging any; getresponse() then reads an early answer or times out itself. Linux autotunes
+    the send buffer up to megabytes on a slow, buffered uplink, so delivering what it holds can take
+    far longer than one timeout. Readiness says nothing here: unread TLS 1.3 session tickets make
+    the socket readable long before the answer."""
     pending = _unacknowledged(sock)
-    while pending:
-        readable, _, _ = select.select([sock], [], [], timeout_s)
-        if readable:
-            return
+    stalls_at = time.monotonic() + timeout_s
+    while pending and time.monotonic() < stalls_at:
+        time.sleep(min(DELIVERY_POLL_S, timeout_s))
         left = _unacknowledged(sock)
-        if left >= pending:
-            raise TimeoutError
+        if left < pending:
+            stalls_at = time.monotonic() + timeout_s
         pending = left
 
 
