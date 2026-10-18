@@ -15,7 +15,7 @@ import pytest
 from photobooth.api import create_app
 from photobooth.config import UploadConfig
 from photobooth.reloader import ConfigReloader
-from photobooth.session import Screen
+from photobooth.session import UPLOADS_STALLED, Screen
 from photobooth.store import BOOMERANG, META, PHOTO, SHARED_META, VIDEO, CaptureStore
 from photobooth.uploader import Uploader
 
@@ -184,7 +184,13 @@ async def start_uploader(store):
             UploadConfig(url, token),
             slot or asyncio.Semaphore(1),
             wake,
-            **{"poll_s": 60.0, "retry_first_s": 0.02, "retry_cap_s": 0.1, **options},
+            **{
+                "on_stalled": lambda stalled: None,
+                "poll_s": 60.0,
+                "retry_first_s": 0.02,
+                "retry_cap_s": 0.1,
+                **options,
+            },
         )
         task = asyncio.create_task(uploader.run())
         running.append(task)
@@ -444,26 +450,74 @@ async def test_server_errors_back_off_exponentially_up_to_the_cap_and_warn_once_
     assert "HTTP 500" in warnings[1]
 
 
-async def test_a_rejected_token_pauses_uploads_with_one_error(store, start_uploader, caplog):
+async def test_a_rejected_token_retries_on_its_own_schedule_with_one_error_and_the_notice(
+    store, start_uploader, caplog
+):
     worker = ShareWorker(token="the-worker-expects-another-token")
+    notices: list[bool] = []
     try:
-        kept(store, "2026-10-18T20:00:00+00:00")
-        kept(store, "2026-10-18T20:01:00+00:00")
+        first = kept(store, "2026-10-18T20:00:00+00:00")
+        second = kept(store, "2026-10-18T20:01:00+00:00")
         with caplog.at_level(logging.DEBUG):
-            task, wake = start_uploader(worker.url, poll_s=0.02)
+            _, wake = start_uploader(worker.url, poll_s=0.02, token_retry_s=0.3, on_stalled=notices.append)
             await until(lambda: len(worker.attempts) == 1)
-            for _ in range(5):
+            await until(lambda: notices and notices[-1])
+            for _ in range(8):
                 wake.set()
                 await asyncio.sleep(0.05)
+            await until(lambda: len(worker.attempts) == 3)
+            worker.token = TOKEN
+            await until(lambda: store.meta(first).uploaded and store.meta(second).uploaded)
     finally:
         worker.stop()
 
-    assert len(worker.attempts) == 1
-    assert task.done() and not task.cancelled()
+    rejected = worker.attempts[:3]
+    assert [(r.capture_id, r.name) for r in rejected] == [(first, PHOTO)] * 3
+    for earlier, later in zip(rejected, rejected[1:]):
+        assert later.at - earlier.at >= 0.3 * 0.8
+    assert notices[-1] is False
     [error] = at_or_above(caplog, logging.WARNING)
     assert "token" in error
     assert logged(caplog, logging.ERROR) == [error]
+    assert any("resumed" in message for message in logged(caplog, logging.INFO))
     assert TOKEN not in caplog.text
+
+
+async def test_the_notice_shows_once_nothing_has_uploaded_for_the_stall_time_and_clears_on_success(
+    store, worker, start_uploader
+):
+    notices: list[bool] = []
+    capture_id = kept(store)
+    worker.answer[PHOTO] = HTTPStatus.SERVICE_UNAVAILABLE
+
+    start_uploader(worker.url, stall_s=0.6, retry_cap_s=0.05, on_stalled=notices.append)
+    began = time.monotonic()
+    await until(lambda: notices and notices[-1])
+    stalled_after = time.monotonic() - began
+    arrived, release = worker.hold(capture_id, SHARED_META)
+    del worker.answer[PHOTO]
+    assert await asyncio.to_thread(arrived.wait, 5)
+    cleared_after_the_photo = notices[-1] is False
+    release.set()
+    await until(lambda: store.meta(capture_id).uploaded)
+
+    assert stalled_after >= 0.6
+    assert len(worker.attempts) > 3
+    assert cleared_after_the_photo
+    assert notices[-1] is False
+
+
+async def test_steady_progress_never_raises_the_notice(store, worker, start_uploader):
+    notices: list[bool] = []
+    worker.read_pace = (64 * 1024, 0.05)
+    backlog = [kept(store, f"2026-10-18T20:0{minute}:00+00:00") for minute in range(4)]
+    for capture_id in backlog:
+        store.path(capture_id, PHOTO).write_bytes(bytes(256 * 1024))
+
+    start_uploader(worker.url, stall_s=0.5, on_stalled=notices.append)
+    await until(lambda: all(store.meta(capture_id).uploaded for capture_id in backlog), timeout=15)
+
+    assert True not in notices
 
 
 async def test_a_file_rejected_as_invalid_is_marked_failed_and_not_retried(store, worker, start_uploader, caplog):
@@ -641,3 +695,19 @@ async def test_a_missing_photo_settles_the_capture_with_one_warning(store, worke
     assert worker.attempts == []
     [warning] = at_or_above(caplog, logging.WARNING)
     assert PHOTO in warning and "missing" in warning
+
+
+async def test_the_app_shows_the_notice_on_the_booth_while_the_token_is_rejected(
+    tmp_path, store, make_booth, camera
+):
+    worker = ShareWorker(token="the-worker-expects-another-token")
+    try:
+        reloader = ConfigReloader(write_config(tmp_path, worker.url))
+        kept(store)
+        booth = make_booth(settings=reloader.settings)
+        app = create_app(booth, camera, store, reloader, None)
+        async with asyncio.timeout(5):
+            async with app.router.lifespan_context(app):
+                await until(lambda: booth.state.notice == UPLOADS_STALLED)
+    finally:
+        worker.stop()

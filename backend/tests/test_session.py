@@ -13,7 +13,7 @@ from photobooth.camera import CameraError
 from photobooth.camera.fake import FakeCamera
 from photobooth.config import LiveSettings
 from photobooth.media import MediaError
-from photobooth.session import FAILURE_MESSAGE, Booth, BoothState, Screen
+from photobooth.session import FAILURE_MESSAGE, UPLOADS_STALLED, Booth, BoothState, Screen
 from photobooth.store import BOOMERANG, CLIP, META, PHOTO, VIDEO, CaptureState, CaptureStore
 
 MEGABYTE = 1024 * 1024
@@ -666,3 +666,21 @@ async def test_stored_is_set_when_a_capture_is_kept_and_when_a_video_arrives(
     release.set()
     await wait_until_set(booth.stored)
     assert store.path(result.capture_id, BOOMERANG).is_file()
+
+
+async def test_the_upload_notice_is_published_and_survives_every_screen_until_cleared(booth, await_screen):
+    events = booth.subscribe()
+
+    booth.set_uploads_stalled(True)
+    assert drain(events)[-1].notice == UPLOADS_STALLED
+    booth.set_uploads_stalled(True)
+    assert drain(events) == []
+
+    await booth.tap()
+    await await_screen(booth, Screen.RESULT)
+    await await_screen(booth, Screen.IDLE)
+    assert {state.notice for state in drain(events)} == {UPLOADS_STALLED}
+
+    booth.set_uploads_stalled(False)
+    assert booth.state == BoothState(Screen.IDLE)
+    assert drain(events) == [BoothState(Screen.IDLE)]

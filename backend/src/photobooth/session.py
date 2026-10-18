@@ -22,6 +22,7 @@ FAILURE_MESSAGE = "Something went wrong - try again"
 CAMERA_NOT_FOUND = "Camera not found"
 CANNOT_SAVE = "Cannot save photos"
 STORAGE_FULL = "Storage is full"
+UPLOADS_STALLED = "Photos are not uploading"
 
 _DELETE_WINDOW = "delete window"
 _RESULT_TIMEOUT = "result timeout"
@@ -48,6 +49,7 @@ class BoothState:
     video_ready: bool = False
     message: str | None = None
     fault: str | None = None
+    notice: str | None = None
 
 
 class Booth:
@@ -75,6 +77,7 @@ class Booth:
         self._builds: set[asyncio.Task[None]] = set()
         self.build_slot = asyncio.Semaphore(1)
         self.stored = asyncio.Event()
+        self._notice: str | None = None
 
     def subscribe(self) -> asyncio.Queue[BoothState]:
         queue: asyncio.Queue[BoothState] = asyncio.Queue()
@@ -83,6 +86,12 @@ class Booth:
 
     def unsubscribe(self, queue: asyncio.Queue[BoothState]) -> None:
         self._subscribers.discard(queue)
+
+    def set_uploads_stalled(self, stalled: bool) -> None:
+        notice = UPLOADS_STALLED if stalled else None
+        if notice != self._notice:
+            self._notice = notice
+            self._set_state(self.state)
 
     async def start(self) -> None:
         async with self._lock:
@@ -348,9 +357,9 @@ class Booth:
         self._set_state(replace(self.state, **changes))
 
     def _set_state(self, state: BoothState) -> None:
-        self.state = state
+        self.state = replace(state, notice=self._notice)
         for queue in self._subscribers:
-            queue.put_nowait(state)
+            queue.put_nowait(self.state)
 
 
 def _measure_fps(frames: Sequence[Frame]) -> float:

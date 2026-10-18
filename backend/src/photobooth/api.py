@@ -50,7 +50,7 @@ def create_app(
     settings = reloader.settings
     app_version = installed_version()
     upload = reloader.config.upload
-    uploader = None if upload is None else Uploader(store, upload, booth.build_slot, booth.stored)
+    uploader = None if upload is None else Uploader(store, upload, booth.build_slot, booth.stored, booth.set_uploads_stalled)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:

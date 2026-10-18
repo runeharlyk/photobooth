@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -16,6 +17,8 @@ POLL_S = 30.0
 RETRY_FIRST_S = 5.0
 RETRY_CAP_S = 300.0
 REQUEST_TIMEOUT_S = 30
+STALL_S = 15 * 60.0
+TOKEN_RETRY_S = 30 * 60.0
 USER_AGENT = "photobooth-uploader"
 CONTENT_TYPES = {PHOTO: "image/jpeg", SHARED_META: "application/json", BOOMERANG: "video/mp4", VIDEO: "video/mp4"}
 
@@ -30,6 +33,9 @@ class _TokenRejected(Exception):
     pass
 
 
+_TOKEN_REJECTED = "the token was rejected"
+
+
 class Uploader:
     """Uploads kept captures to the sharing Worker, one file at a time.
 
@@ -37,9 +43,13 @@ class Uploader:
     boomerang or video, so a guest waiting at the booth is not queued behind a backlog of videos;
     a wake during a pass starts a new one. Progress is recorded per file in the capture's
     metadata, so a restart resumes where it stopped. A failure to reach the Worker is retried
-    with exponential backoff and logged once until it changes; a rejected token pauses uploads
-    until a restart, since [upload] is read only at startup. Logs name only the Worker's scheme
-    and host, never the token.
+    with exponential backoff and logged once until it changes; a rejected token is logged once
+    and retried every token_retry_s, wakes aside. Logs name only the Worker's scheme and host,
+    never the token.
+
+    `on_stalled` is told whether uploads are stalled: the token is rejected, or files have been
+    due for stall_s with none uploaded, counting from when they became due or from the last
+    successful upload, whichever is later. A successful upload clears it at once.
     """
 
     def __init__(
@@ -48,21 +58,28 @@ class Uploader:
         config: UploadConfig,
         slot: asyncio.Semaphore,
         wake: asyncio.Event,
+        on_stalled: Callable[[bool], None],
         poll_s: float = POLL_S,
         retry_first_s: float = RETRY_FIRST_S,
         retry_cap_s: float = RETRY_CAP_S,
         timeout_s: float = REQUEST_TIMEOUT_S,
+        stall_s: float = STALL_S,
+        token_retry_s: float = TOKEN_RETRY_S,
     ) -> None:
         self._store = store
         self._config = config
         self._slot = slot
         self._wake = wake
+        self._on_stalled = on_stalled
         self._poll_s = poll_s
         self._retry_first_s = retry_first_s
         self._retry_cap_s = retry_cap_s
         self._timeout_s = timeout_s
+        self._stall_s = stall_s
+        self._token_retry_s = token_retry_s
         self._label = scheme_and_host(config.url)
         self._failure: str | None = None
+        self._waiting_since: float | None = None
         self._settled: set[str] = set()
         self._unreadable: set[str] = set()
 
@@ -76,27 +93,49 @@ class Uploader:
                     continue
                 retry_s = 0.0
             except _TokenRejected:
-                logger.error("%s rejected the upload token; uploads are paused until a restart", self._label)
-                return
+                if self._failure != _TOKEN_REJECTED:
+                    logger.error(
+                        "%s rejected the upload token; retrying every %g s", self._label, self._token_retry_s
+                    )
+                self._failure = _TOKEN_REJECTED
+                self._publish()
+                await asyncio.sleep(self._token_retry_s)
+                continue
             except _Unavailable as failure:
                 self._note_failure(str(failure))
                 retry_s = min(self._retry_cap_s, retry_s * 2 or self._retry_first_s)
             except Exception as error:
                 self._note_failure(f"unexpected error {error!r}", exc_info=True)
                 retry_s = min(self._retry_cap_s, retry_s * 2 or self._retry_first_s)
-            await self._sleep(retry_s or self._poll_s)
+            until_stalled = self._publish()
+            wait_s = retry_s or self._poll_s
+            await self._sleep(wait_s if until_stalled is None else min(wait_s, until_stalled))
 
     async def _upload_due(self) -> bool:
         """Uploads every due file; False when woken part-way, so the caller plans again at once."""
-        for index, (capture_id, name) in enumerate(await asyncio.to_thread(self._due)):
+        due = await asyncio.to_thread(self._due)
+        if not due:
+            self._waiting_since = None
+        elif self._waiting_since is None:
+            self._waiting_since = time.monotonic()
+        for index, (capture_id, name) in enumerate(due):
             if index and self._wake.is_set():
                 return False
             async with self._slot:
                 sent = await asyncio.to_thread(self._upload, capture_id, name)
-            if sent and self._failure is not None:
-                logger.info("uploads to %s resumed", self._label)
-                self._failure = None
+            if sent:
+                self._waiting_since = time.monotonic()
+                if self._failure is not None:
+                    logger.info("uploads to %s resumed", self._label)
+                    self._failure = None
+                self._publish()
         return True
+
+    def _publish(self) -> float | None:
+        """Tells on_stalled whether uploads are stalled; returns the seconds until they would be, if ahead."""
+        left = None if self._waiting_since is None else self._waiting_since + self._stall_s - time.monotonic()
+        self._on_stalled(self._failure == _TOKEN_REJECTED or (left is not None and left <= 0))
+        return left if left is not None and left > 0 else None
 
     async def _sleep(self, seconds: float) -> None:
         try:

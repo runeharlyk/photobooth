@@ -278,3 +278,15 @@ async def test_the_camera_stops_even_if_closing_the_booth_fails(make_booth, came
             await asyncio.to_thread(camera.start)
 
     assert camera.running is False
+
+
+async def test_the_upload_notice_reaches_the_event_stream(serve, make_booth):
+    booth = make_booth()
+    client = await serve(booth=booth)
+    assert (await await_event(client, lambda _: True))["notice"] is None
+
+    booth.set_uploads_stalled(True)
+
+    event = await await_event(client, lambda event: event["notice"] is not None)
+    assert event["notice"] == "Photos are not uploading"
+    assert event["screen"] == "idle"
