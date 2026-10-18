@@ -1,11 +1,13 @@
 import asyncio
 import http.client
+import io
 import json
 import logging
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from http import HTTPStatus
+from typing import BinaryIO
 
 from photobooth.config import UploadConfig
 from photobooth.redact import describe_failure, scheme_and_host
@@ -50,6 +52,7 @@ class Uploader:
         poll_s: float = POLL_S,
         retry_first_s: float = RETRY_FIRST_S,
         retry_cap_s: float = RETRY_CAP_S,
+        timeout_s: float = REQUEST_TIMEOUT_S,
     ) -> None:
         self._store = store
         self._config = config
@@ -58,6 +61,7 @@ class Uploader:
         self._poll_s = poll_s
         self._retry_first_s = retry_first_s
         self._retry_cap_s = retry_cap_s
+        self._timeout_s = timeout_s
         self._label = scheme_and_host(config.url)
         self._failure: str | None = None
         self._settled: set[str] = set()
@@ -136,7 +140,8 @@ class Uploader:
                 logger.warning("%s of capture %s is missing; it will not be uploaded", name, capture_id)
                 self._record(self._store.record_upload_failure, capture_id, name)
             return False
-        status = self._put(capture_id, name, body)
+        with body:
+            status = self._put(capture_id, name, body)
         if status == HTTPStatus.UNAUTHORIZED:
             raise _TokenRejected
         if status == HTTPStatus.BAD_REQUEST:
@@ -150,13 +155,15 @@ class Uploader:
         self._record(self._store.record_upload, capture_id, name)
         return True
 
-    def _body(self, capture_id: str, name: str) -> bytes:
+    def _body(self, capture_id: str, name: str) -> BinaryIO:
         meta = self._store.meta(capture_id)
         if name == SHARED_META:
-            return json.dumps({"captured_at": meta.captured_at, "event": meta.event}).encode("utf-8")
-        return self._store.path(capture_id, name).read_bytes()
+            return io.BytesIO(json.dumps({"captured_at": meta.captured_at, "event": meta.event}).encode("utf-8"))
+        return self._store.path(capture_id, name).open("rb")
 
-    def _put(self, capture_id: str, name: str, body: bytes) -> int:
+    def _put(self, capture_id: str, name: str, body: BinaryIO) -> int:
+        """Sends the body as a stream: http.client then writes it block by block, each block with
+        its own timeout, where a bytes body is one write whose timeout bounds the whole upload."""
         request = urllib.request.Request(
             f"{self._config.url}/api/captures/{capture_id}/{name}",
             data=body,
@@ -164,11 +171,12 @@ class Uploader:
             headers={
                 "Authorization": f"Bearer {self._config.token}",
                 "Content-Type": CONTENT_TYPES[name],
+                "Content-Length": str(_size(body)),
                 "User-Agent": USER_AGENT,
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_S) as response:
+            with urllib.request.urlopen(request, timeout=self._timeout_s) as response:
                 return response.status
         except urllib.error.HTTPError as error:
             error.close()
@@ -189,3 +197,9 @@ class Uploader:
                 "uploads to %s are failing (%s); retrying with backoff", self._label, failure, exc_info=exc_info
             )
         self._failure = failure
+
+
+def _size(body: BinaryIO) -> int:
+    size = body.seek(0, io.SEEK_END)
+    body.seek(0)
+    return size

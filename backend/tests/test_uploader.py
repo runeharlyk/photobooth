@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import socket
 import threading
 import time
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from photobooth.uploader import Uploader
 TOKEN = "s3cret-upload-token"
 CONTENT_TYPES = {PHOTO: "image/jpeg", SHARED_META: "application/json", BOOMERANG: "video/mp4", VIDEO: "video/mp4"}
 ROUTE = re.compile(r"/api/captures/([A-Za-z0-9_-]{22})/(photo\.jpg|meta\.json|boomerang\.mp4|video\.mp4)")
+RECEIVE_BUFFER_BYTES = 64 * 1024
 EVENT = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 
 
@@ -47,6 +49,7 @@ class ShareWorker:
         self.uploads: list[Request] = []
         self.attempts: list[Request] = []
         self.answer: dict[str, HTTPStatus] = {}
+        self.read_pace: tuple[int, float] | None = None
         self._holds: dict[tuple[str, str], tuple[threading.Event, threading.Event]] = {}
         self._port = 0
         self._start()
@@ -81,7 +84,7 @@ class ShareWorker:
 
         class Handler(BaseHTTPRequestHandler):
             def do_PUT(self) -> None:
-                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                body = self._read_body(int(self.headers.get("Content-Length", 0)))
                 match = ROUTE.fullmatch(self.path)
                 if match is None:
                     self._reply(HTTPStatus.BAD_REQUEST)
@@ -100,6 +103,20 @@ class ShareWorker:
                     gate[1].wait(10)
                 self._reply(worker._status(request))
 
+            def _read_body(self, length: int) -> bytes:
+                if worker.read_pace is None:
+                    return self.rfile.read(length)
+                chunk, pause_s = worker.read_pace
+                parts = []
+                while length > 0:
+                    time.sleep(pause_s)
+                    part = self.rfile.read1(min(chunk, length))
+                    if not part:
+                        break
+                    parts.append(part)
+                    length -= len(part)
+                return b"".join(parts)
+
             def _reply(self, status: HTTPStatus) -> None:
                 self.send_response(status)
                 self.send_header("Content-Length", "0")
@@ -108,7 +125,7 @@ class ShareWorker:
             def log_message(self, *args) -> None:
                 pass
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", self._port), Handler)
+        self._server = SmallBufferServer(("127.0.0.1", self._port), Handler)
         self._port = self._server.server_address[1]
         self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.05})
         self._thread.start()
@@ -122,6 +139,14 @@ class ShareWorker:
             return forced
         self.uploads.append(request)
         return HTTPStatus.NO_CONTENT
+
+
+class SmallBufferServer(ThreadingHTTPServer):
+    """Keeps the kernel receive buffer small, so a slow reader makes the sender wait."""
+
+    def server_bind(self) -> None:
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, RECEIVE_BUFFER_BYTES)
+        super().server_bind()
 
 
 def _valid_meta(request: Request) -> bool:
@@ -150,19 +175,16 @@ async def start_uploader(store):
         uploader_store: CaptureStore | None = None,
         slot: asyncio.Semaphore | None = None,
         wake: asyncio.Event | None = None,
-        poll_s: float = 60.0,
-        retry_first_s: float = 0.02,
-        retry_cap_s: float = 0.1,
+        token: str = TOKEN,
+        **options,
     ) -> tuple[asyncio.Task, asyncio.Event]:
         wake = wake or asyncio.Event()
         uploader = Uploader(
             uploader_store or store,
-            UploadConfig(url, TOKEN),
+            UploadConfig(url, token),
             slot or asyncio.Semaphore(1),
             wake,
-            poll_s=poll_s,
-            retry_first_s=retry_first_s,
-            retry_cap_s=retry_cap_s,
+            **{"poll_s": 60.0, "retry_first_s": 0.02, "retry_cap_s": 0.1, **options},
         )
         task = asyncio.create_task(uploader.run())
         running.append(task)
@@ -548,3 +570,19 @@ async def test_the_app_does_not_upload_without_an_upload_table(tmp_path, store, 
         await asyncio.sleep(0.3)
 
     assert worker.attempts == []
+
+
+async def test_a_large_photo_on_a_slow_uplink_is_sent_in_blocks_each_within_the_timeout(
+    store, worker, start_uploader, caplog
+):
+    capture_id = kept(store)
+    photo = bytes(range(256)) * (16 * 1024)
+    store.path(capture_id, PHOTO).write_bytes(photo)
+    worker.read_pace = (64 * 1024, 0.03)
+
+    with caplog.at_level(logging.WARNING):
+        start_uploader(worker.url, timeout_s=0.5)
+        await until(lambda: store.meta(capture_id).uploaded, timeout=20)
+
+    assert worker.uploads[0].body == photo
+    assert at_or_above(caplog, logging.WARNING) == []
