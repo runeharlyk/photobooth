@@ -479,7 +479,7 @@ async def test_a_file_rejected_as_invalid_is_marked_failed_and_not_retried(store
     assert worker.names(attempts=True).count((capture_id, SHARED_META)) == 1
     assert worker.names() == [(capture_id, n) for n in (PHOTO, BOOMERANG, VIDEO)]
     meta = store.meta(capture_id)
-    assert (meta.failed_files, meta.uploaded) == ([SHARED_META], False)
+    assert (meta.failed_files, meta.uploaded) == ([SHARED_META], True)
     [error] = at_or_above(caplog, logging.WARNING)
     assert SHARED_META in error and capture_id in error and "400" in error
 
@@ -511,7 +511,7 @@ async def test_uploads_wait_while_a_media_build_holds_the_slot(store, worker, st
 
 
 async def test_the_token_and_the_upload_paths_never_reach_the_log(store, worker, start_uploader, caplog):
-    capture_id = kept(store, videos=(BOOMERANG,))
+    capture_id = kept(store, videos=(BOOMERANG,), finished=False)
     worker.answer[PHOTO] = HTTPStatus.BAD_GATEWAY
     worker.answer[BOOMERANG] = HTTPStatus.BAD_REQUEST
 
@@ -601,3 +601,40 @@ async def test_a_request_that_cannot_be_built_is_logged_by_type_only(store, work
     [warning] = at_or_above(caplog, logging.WARNING)
     assert "Error" in warning
     assert TOKEN not in caplog.text
+
+
+async def test_a_rejected_photo_settles_the_capture_without_uploading_its_other_files(
+    store, worker, start_uploader, caplog
+):
+    rejected = kept(store, "2026-10-18T20:00:00+00:00", videos=(BOOMERANG, VIDEO))
+    later = kept(store, "2026-10-18T20:01:00+00:00")
+    worker.answer[PHOTO] = HTTPStatus.BAD_REQUEST
+    arrived, release = worker.hold(later, PHOTO)
+
+    with caplog.at_level(logging.WARNING):
+        start_uploader(worker.url, poll_s=0.02)
+        assert await asyncio.to_thread(arrived.wait, 5)
+        del worker.answer[PHOTO]
+        release.set()
+        await until(lambda: store.meta(later).uploaded)
+        await asyncio.sleep(0.2)
+
+    assert worker.names(rejected, attempts=True) == [(rejected, PHOTO)]
+    meta = store.meta(rejected)
+    assert (meta.uploaded, meta.failed_files, meta.uploaded_files) == (True, [PHOTO], [])
+    [error] = at_or_above(caplog, logging.WARNING)
+    assert PHOTO in error and "400" in error
+
+
+async def test_a_missing_photo_settles_the_capture_with_one_warning(store, worker, start_uploader, caplog):
+    capture_id = kept(store, videos=(BOOMERANG,))
+    store.path(capture_id, PHOTO).unlink()
+
+    with caplog.at_level(logging.WARNING):
+        start_uploader(worker.url, poll_s=0.02)
+        await until(lambda: store.meta(capture_id).uploaded)
+        await asyncio.sleep(0.2)
+
+    assert worker.attempts == []
+    [warning] = at_or_above(caplog, logging.WARNING)
+    assert PHOTO in warning and "missing" in warning

@@ -570,17 +570,28 @@ def test_a_build_finished_without_videos_needs_only_the_photo_and_metadata(store
     assert store.unuploaded(meta) == []
 
 
-def test_a_rejected_file_is_no_longer_due_and_the_capture_never_counts_as_uploaded(store: CaptureStore):
+def test_a_rejected_file_is_no_longer_due_and_the_capture_is_settled_once_built(store: CaptureStore):
     capture_id = _kept(store)
-    store.finish_build(capture_id)
     store.record_upload(capture_id, PHOTO)
 
     store.record_upload_failure(capture_id, SHARED_META)
+    assert store.meta(capture_id).uploaded is False
+    store.finish_build(capture_id)
 
     meta = store.meta(capture_id)
     assert meta.failed_files == [SHARED_META]
     assert store.unuploaded(meta) == []
-    assert meta.uploaded is False
+    assert meta.uploaded is True
+
+
+def test_a_rejected_photo_settles_the_capture_without_its_other_files(store: CaptureStore):
+    capture_id = _kept(store, videos=(BOOMERANG, VIDEO))
+
+    store.record_upload_failure(capture_id, PHOTO)
+
+    meta = store.meta(capture_id)
+    assert store.unuploaded(meta) == []
+    assert (meta.uploaded, meta.build_finished, meta.uploaded_files) == (True, False, [])
 
 
 def test_recording_an_upload_twice_lists_it_once(store: CaptureStore):

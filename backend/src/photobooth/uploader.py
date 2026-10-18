@@ -10,7 +10,7 @@ from typing import BinaryIO
 
 from photobooth.config import UploadConfig
 from photobooth.redact import describe_failure, scheme_and_host
-from photobooth.store import BOOMERANG, PHOTO, SHARED_META, VIDEO, VIDEOS, CaptureState, CaptureStore
+from photobooth.store import BOOMERANG, PHOTO, SHARED_META, VIDEO, VIDEOS, CaptureMeta, CaptureState, CaptureStore
 
 POLL_S = 30.0
 RETRY_FIRST_S = 5.0
@@ -121,10 +121,10 @@ class Uploader:
                 continue
             if meta.state is not CaptureState.KEPT:
                 continue
-            names = self._store.unuploaded(meta)
-            if not names and meta.build_finished:
+            if meta.uploaded:
                 self._settled.add(capture_id)
-            captures.append((meta.captured_at, capture_id, names))
+                continue
+            captures.append((meta.captured_at, capture_id, self._store.unuploaded(meta)))
         captures.sort()
         stills = [(capture_id, name) for _, capture_id, names in captures for name in names if name not in VIDEOS]
         videos = [(capture_id, name) for _, capture_id, names in captures for name in names if name in VIDEOS]
@@ -133,7 +133,10 @@ class Uploader:
     def _upload(self, capture_id: str, name: str) -> bool:
         """Uploads one file and records the outcome; True when the Worker stored it."""
         try:
-            body = self._body(capture_id, name)
+            meta = self._store.meta(capture_id)
+            if name not in self._store.unuploaded(meta):
+                return False
+            body = self._body(meta, name)
         except FileNotFoundError:
             if self._store.exists(capture_id):
                 logger.warning("%s of capture %s is missing; it will not be uploaded", name, capture_id)
@@ -154,11 +157,10 @@ class Uploader:
         self._record(self._store.record_upload, capture_id, name)
         return True
 
-    def _body(self, capture_id: str, name: str) -> BinaryIO:
-        meta = self._store.meta(capture_id)
+    def _body(self, meta: CaptureMeta, name: str) -> BinaryIO:
         if name == SHARED_META:
             return io.BytesIO(json.dumps({"captured_at": meta.captured_at, "event": meta.event}).encode("utf-8"))
-        return self._store.path(capture_id, name).open("rb")
+        return self._store.path(meta.id, name).open("rb")
 
     def _put(self, capture_id: str, name: str, body: BinaryIO) -> int:
         """Sends the body as a stream: http.client then writes it block by block, each block with

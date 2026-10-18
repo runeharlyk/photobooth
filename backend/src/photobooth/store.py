@@ -37,11 +37,15 @@ class CaptureState(StrEnum):
 class CaptureMeta:
     """The metadata of one capture.
 
-    `uploaded_files` names what has been uploaded, `failed_files` what the server rejected and
-    will not be retried. `build_finished` is set once no boomerang or video will be added: the
-    build has ended, or the process that ran it ended, since builds never resume after a
-    restart. A video still missing then is missing for good, so `uploaded` means the photo,
-    meta.json and every video that exists were uploaded once the build had finished.
+    `uploaded_files` names what has been uploaded, `failed_files` what failed for good (rejected
+    by the server, or missing) and is never retried. `build_finished` is set once no boomerang or
+    video will be added: the build has ended, or the process that ran it ended, since builds
+    never resume after a restart. A video still missing then is missing for good.
+
+    `uploaded` marks a capture the uploader is done with, so a restart neither repeats nor skips
+    it: every file that exists, once the build has finished, was uploaded or failed for good.
+    A failed photo settles the capture at once, since meta.json and videos without the photo
+    would only make the guest page report the photos as expired.
     """
 
     id: str
@@ -137,6 +141,8 @@ class CaptureStore:
 
     def unuploaded(self, meta: CaptureMeta) -> list[str]:
         """The files of a capture still to upload, in upload order."""
+        if PHOTO in meta.failed_files:
+            return []
         done = {*meta.uploaded_files, *meta.failed_files}
         return [name for name in self._uploadable(meta.id) if name not in done]
 
@@ -222,9 +228,7 @@ class CaptureStore:
         with self._meta_lock:
             meta = self.meta(capture_id)
             change(meta)
-            meta.uploaded = meta.build_finished and all(
-                name in meta.uploaded_files for name in self._uploadable(capture_id)
-            )
+            meta.uploaded = PHOTO in meta.failed_files or (meta.build_finished and not self.unuploaded(meta))
             final = self.path(capture_id, META)
             staging = final.with_suffix(".json.tmp")
             _write_durably(staging, [_dump(meta).encode("utf-8")])
