@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import shutil
+import threading
 import types
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from photobooth.store import (
     CLIP_KEEP_FREE_BYTES,
     META,
     PHOTO,
+    SHARED_META,
     VIDEO,
     CaptureState,
     CaptureStore,
@@ -481,3 +483,181 @@ def test_recover_keeps_a_pending_capture_with_its_non_default_event(store: Captu
     assert store.meta(capture_id).state == CaptureState.KEPT
     stored = json.loads(store.path(capture_id, META).read_text(encoding="utf-8"))
     assert stored["event"] == "party"
+
+
+def _kept(store: CaptureStore, videos: tuple[str, ...] = ()) -> str:
+    capture_id = store.new_id()
+    store.create(capture_id, b"photo", [b"f"], 10.0, "party")
+    store.keep(capture_id)
+    for name in videos:
+        store.path(capture_id, name).write_bytes(b"media")
+    return capture_id
+
+
+def _without_upload_fields(store: CaptureStore, capture_id: str) -> None:
+    meta_path = store.path(capture_id, META)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    for key in ("uploaded_files", "failed_files", "build_finished"):
+        del meta[key]
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+
+def test_a_new_capture_has_nothing_uploaded_and_its_build_unfinished(store: CaptureStore):
+    capture_id = _kept(store)
+
+    meta = store.meta(capture_id)
+
+    assert (meta.uploaded, meta.uploaded_files, meta.failed_files, meta.build_finished) == (False, [], [], False)
+    assert store.unuploaded(meta) == [PHOTO, SHARED_META]
+
+
+def test_a_capture_made_before_uploads_reads_as_nothing_uploaded(store: CaptureStore):
+    capture_id = _kept(store, videos=(BOOMERANG, VIDEO))
+    _without_upload_fields(store, capture_id)
+
+    meta = store.meta(capture_id)
+
+    assert (meta.uploaded, meta.uploaded_files, meta.failed_files) == (False, [], [])
+    assert store.unuploaded(meta) == [PHOTO, SHARED_META, BOOMERANG, VIDEO]
+
+
+def test_the_videos_are_due_in_order_once_each_exists(store: CaptureStore):
+    capture_id = _kept(store, videos=(VIDEO,))
+    store.record_upload(capture_id, PHOTO)
+
+    assert store.unuploaded(store.meta(capture_id)) == [SHARED_META, VIDEO]
+
+    store.path(capture_id, BOOMERANG).write_bytes(b"media")
+    assert store.unuploaded(store.meta(capture_id)) == [SHARED_META, BOOMERANG, VIDEO]
+
+
+def test_upload_progress_survives_a_restart(store: CaptureStore):
+    capture_id = _kept(store, videos=(BOOMERANG,))
+    store.record_upload(capture_id, PHOTO)
+    store.record_upload(capture_id, SHARED_META)
+
+    rebooted = CaptureStore(store.root)
+    rebooted.recover()
+
+    assert rebooted.meta(capture_id).uploaded_files == [PHOTO, SHARED_META]
+    assert rebooted.unuploaded(rebooted.meta(capture_id)) == [BOOMERANG]
+
+
+def test_uploaded_waits_for_both_videos_while_the_build_runs(store: CaptureStore):
+    capture_id = _kept(store, videos=(BOOMERANG,))
+    for name in (PHOTO, SHARED_META, BOOMERANG):
+        store.record_upload(capture_id, name)
+    assert store.meta(capture_id).uploaded is False
+
+    store.path(capture_id, VIDEO).write_bytes(b"media")
+    store.finish_build(capture_id)
+    assert store.meta(capture_id).uploaded is False
+
+    store.record_upload(capture_id, VIDEO)
+    assert store.meta(capture_id).uploaded is True
+
+
+def test_a_build_finished_without_videos_needs_only_the_photo_and_metadata(store: CaptureStore):
+    capture_id = _kept(store)
+    store.record_upload(capture_id, PHOTO)
+    store.record_upload(capture_id, SHARED_META)
+    assert store.meta(capture_id).uploaded is False
+
+    store.finish_build(capture_id)
+
+    meta = store.meta(capture_id)
+    assert meta.uploaded is True
+    assert store.unuploaded(meta) == []
+
+
+def test_a_rejected_file_is_no_longer_due_and_the_capture_never_counts_as_uploaded(store: CaptureStore):
+    capture_id = _kept(store)
+    store.finish_build(capture_id)
+    store.record_upload(capture_id, PHOTO)
+
+    store.record_upload_failure(capture_id, SHARED_META)
+
+    meta = store.meta(capture_id)
+    assert meta.failed_files == [SHARED_META]
+    assert store.unuploaded(meta) == []
+    assert meta.uploaded is False
+
+
+def test_recording_an_upload_twice_lists_it_once(store: CaptureStore):
+    capture_id = _kept(store)
+
+    store.record_upload(capture_id, PHOTO)
+    store.record_upload(capture_id, PHOTO)
+
+    assert store.meta(capture_id).uploaded_files == [PHOTO]
+
+
+def test_recover_finishes_a_build_cut_short_and_keeps_its_progress(store: CaptureStore):
+    capture_id = _kept(store, videos=(BOOMERANG,))
+    for name in (PHOTO, SHARED_META, BOOMERANG):
+        store.record_upload(capture_id, name)
+    pending_id = store.new_id()
+    store.create(pending_id, b"photo", [b"f"], 10.0, "kitchen")
+
+    store.recover()
+
+    meta = store.meta(capture_id)
+    assert (meta.build_finished, meta.uploaded, meta.event) == (True, True, "party")
+    pending = store.meta(pending_id)
+    assert (pending.state, pending.build_finished, pending.uploaded) == (CaptureState.KEPT, True, False)
+
+
+def test_recover_finishes_the_build_of_a_capture_made_before_uploads(store: CaptureStore):
+    capture_id = _kept(store, videos=(BOOMERANG, VIDEO))
+    _without_upload_fields(store, capture_id)
+
+    store.recover()
+
+    meta = store.meta(capture_id)
+    assert (meta.build_finished, meta.uploaded_files) == (True, [])
+    assert store.unuploaded(meta) == [PHOTO, SHARED_META, BOOMERANG, VIDEO]
+
+
+def test_recording_an_upload_for_a_deleted_capture_does_not_recreate_it(store: CaptureStore):
+    capture_id = _kept(store)
+    store.delete(capture_id)
+
+    with pytest.raises(FileNotFoundError):
+        store.record_upload(capture_id, PHOTO)
+    with pytest.raises(FileNotFoundError):
+        store.finish_build(capture_id)
+
+    assert not store.path(capture_id, META).parent.exists()
+
+
+def test_capture_ids_lists_only_capture_directories(store: CaptureStore):
+    capture_id = _kept(store)
+    (store.root / ".state").mkdir()
+    (store.root / ".tmp-build-x").mkdir()
+    (store.root / "notes.txt").write_text("x", encoding="utf-8")
+
+    assert store.capture_ids() == [capture_id]
+
+
+def test_concurrent_metadata_updates_lose_nothing(store: CaptureStore):
+    capture_ids = [_kept(store) for _ in range(20)]
+
+    def upload_all() -> None:
+        for capture_id in capture_ids:
+            for name in (PHOTO, SHARED_META):
+                store.record_upload(capture_id, name)
+
+    def finish_all() -> None:
+        for capture_id in capture_ids:
+            store.finish_build(capture_id)
+            store.meta(capture_id)
+
+    threads = [threading.Thread(target=upload_all), threading.Thread(target=finish_all)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    for capture_id in capture_ids:
+        meta = store.meta(capture_id)
+        assert (meta.uploaded_files, meta.build_finished, meta.uploaded) == ([PHOTO, SHARED_META], True, True)
