@@ -27,6 +27,8 @@ UNIT="$UNIT_DIR/photobooth.service"
 UPDATE_UNIT="$UNIT_DIR/photobooth-update.service"
 UPDATE_TIMER="$UNIT_DIR/photobooth-update.timer"
 KIOSK="$APP_DIR/kiosk.sh"
+KIOSK_LOG="$APP_DIR/kiosk.log"
+KIOSK_URL="http://127.0.0.1:8000/"
 AUTOSTART="$HOME/.config/labwc/autostart"
 APT_PACKAGES=(python3-picamera2 ffmpeg chromium-browser curl)
 
@@ -210,10 +212,10 @@ RestartSec=2
 WantedBy=default.target"
 
   write_file "$KIOSK" "#!/usr/bin/env bash
-until curl -fs -o /dev/null http://127.0.0.1:8000/; do sleep 1; done
+until curl -fs -o /dev/null $KIOSK_URL; do sleep 1; done
 exec chromium-browser --kiosk --incognito --noerrdialogs --disable-infobars --no-first-run \\
   --password-store=basic --ozone-platform=wayland --disable-features=Translate \\
-  http://127.0.0.1:8000/" 755
+  $KIOSK_URL" 755
 
   write_file "$AUTOSTART" "$KIOSK &"
 
@@ -243,24 +245,118 @@ OnCalendar=*-*-* 04:00:00
 WantedBy=timers.target"
 }
 
+# Prints the environment of the user's running labwc session, or fails when there is none:
+# XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS from the compositor's own environment, and
+# WAYLAND_DISPLAY from the socket it listens on, because labwc sets that variable only after it
+# has started, so it never appears in /proc/<pid>/environ.
+session_env() {
+  local pid environment runtime display
+  pid="$(pgrep -o -u "$(id -u)" -x labwc)" || return 1
+  environment="$( { tr '\0' '\n' <"/proc/$pid/environ"; } 2>/dev/null)" || return 1
+  runtime="$(sed -n 's/^XDG_RUNTIME_DIR=//p' <<<"$environment")"
+  [ -n "$runtime" ] || return 1
+  display="$(ss -xlpH | awk -v owner="pid=$pid," -v dir="$runtime/" '
+    index($0, owner) && index($5, dir) == 1 && substr($5, length(dir) + 1) ~ /^wayland-[0-9]+$/ {
+      print substr($5, length(dir) + 1); exit
+    }')"
+  [ -n "$display" ] || return 1
+  grep -E '^(XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS|XDG_CURRENT_DESKTOP)=' <<<"$environment"
+  echo "WAYLAND_DISPLAY=$display"
+}
+
+# Prints the command line of process $1 with its arguments joined by spaces, which is also the
+# only form Chromium leaves, since it rewrites its command line into a single string; fails
+# when the process has exited.
+cmdline_of() {
+  { tr '\0' ' ' <"/proc/$1/cmdline"; } 2>/dev/null | sed 's/ *$//'
+}
+
+# The main process of a kiosk browser: named chromium, with --kiosk and the booth's URL as its
+# last argument. Its helper processes carry --type= instead and exit with it.
+kiosk_browser_pids() {
+  local pid cmdline
+  for pid in $(pgrep -u "$(id -u)" -x chromium || true); do
+    cmdline="$(cmdline_of "$pid")" || continue
+    if [[ "$cmdline " == *" --kiosk "* && "$cmdline" == *" $KIOSK_URL" ]]; then
+      echo "$pid"
+    fi
+  done
+}
+
+# The kiosk browser and the kiosk script that waits for the backend before starting it. The
+# script is compared with its exact command line rather than a pattern, so that no other
+# process can match, least of all an installer run as bash -c "<script text>".
+kiosk_pids() {
+  local pid
+  for pid in $(pgrep -u "$(id -u)" -x bash || true); do
+    if [ "$(cmdline_of "$pid")" = "bash $KIOSK" ]; then
+      echo "$pid"
+    fi
+  done
+  kiosk_browser_pids
+}
+
+# Stops every running kiosk and waits until it has exited, so that the next browser does not
+# find the old one's profile lock and hand its URL to a window that is about to close: five
+# seconds after SIGTERM, survivors get SIGKILL and one more second to disappear.
+stop_kiosk() {
+  local pids pid survivors attempt
+  pids="$(kiosk_pids)"
+  [ -n "$pids" ] || return 0
+  # shellcheck disable=SC2086
+  kill $pids 2>/dev/null || true
+  for ((attempt = 1; attempt <= 60; attempt++)); do
+    survivors=""
+    for pid in $pids; do
+      ! kill -0 "$pid" 2>/dev/null || survivors+=" $pid"
+    done
+    [ -n "$survivors" ] || return 0
+    # shellcheck disable=SC2086
+    [ "$attempt" -ne 50 ] || kill -KILL $survivors 2>/dev/null || true
+    sleep 0.1
+  done
+  echo "the old kiosk (pid$survivors) did not exit" >&2
+  return 1
+}
+
+# Waits, through the backend's startup, for a kiosk browser that is still running two seconds
+# after it appeared.
+kiosk_came_up() {
+  local attempt
+  for ((attempt = 0; attempt < 60; attempt++)); do
+    if [ -n "$(kiosk_browser_pids)" ]; then
+      sleep 2
+      [ -n "$(kiosk_browser_pids)" ]
+      return
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
 # Starts the kiosk in the desktop session that is already running, so a manual install needs no
 # reboot; without a session, labwc's autostart starts it at the next login.
 start_kiosk() {
-  local runtime display
-  runtime="/run/user/$(id -u)"
-  display="$(find "$runtime" -maxdepth 1 -name 'wayland-[0-9]' -printf '%f\n' 2>/dev/null | head -n 1 || true)"
-  if [ -z "$display" ]; then
+  local environment session
+  if ! environment="$(session_env)"; then
     echo "no desktop session is running; the kiosk starts at the next login"
     return
   fi
+  mapfile -t session <<<"$environment"
   if $dry_run; then
-    echo "would restart the kiosk on $display"
+    echo "would stop the running kiosk (pids: $(kiosk_pids | xargs)) and start $KIOSK with ${session[*]}, logging to $KIOSK_LOG"
     return
   fi
-  pkill -f "$KIOSK" 2>/dev/null || true
-  pkill -f "chromium.*--kiosk.*127.0.0.1:8000" 2>/dev/null || true
-  WAYLAND_DISPLAY="$display" XDG_RUNTIME_DIR="$runtime" setsid -f "$KIOSK" </dev/null >/dev/null 2>&1
-  echo "kiosk started on $display"
+  stop_kiosk
+  env "${session[@]}" setsid -f "$KIOSK" </dev/null >"$KIOSK_LOG" 2>&1
+  if kiosk_came_up; then
+    echo "kiosk started"
+  elif [ -n "$(kiosk_pids)" ]; then
+    echo "the kiosk is still waiting for $KIOSK_URL and opens once the backend answers; see $KIOSK_LOG"
+  else
+    echo "kiosk did not start; see $KIOSK_LOG" >&2
+    return 1
+  fi
 }
 
 # Everything runs from here, so bash has read the whole script before it acts: a truncated
