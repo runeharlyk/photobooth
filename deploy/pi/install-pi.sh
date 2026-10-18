@@ -243,6 +243,26 @@ OnCalendar=*-*-* 04:00:00
 WantedBy=timers.target"
 }
 
+# Starts the kiosk in the desktop session that is already running, so a manual install needs no
+# reboot; without a session, labwc's autostart starts it at the next login.
+start_kiosk() {
+  local runtime display
+  runtime="/run/user/$(id -u)"
+  display="$(find "$runtime" -maxdepth 1 -name 'wayland-[0-9]' -printf '%f\n' 2>/dev/null | head -n 1 || true)"
+  if [ -z "$display" ]; then
+    echo "no desktop session is running; the kiosk starts at the next login"
+    return
+  fi
+  if $dry_run; then
+    echo "would restart the kiosk on $display"
+    return
+  fi
+  pkill -f "$KIOSK" 2>/dev/null || true
+  pkill -f "chromium.*--kiosk.*127.0.0.1:8000" 2>/dev/null || true
+  WAYLAND_DISPLAY="$display" XDG_RUNTIME_DIR="$runtime" setsid -f "$KIOSK" </dev/null >/dev/null 2>&1
+  echo "kiosk started on $display"
+}
+
 # Everything runs from here, so bash has read the whole script before it acts: a truncated
 # download fails to parse instead of running a prefix, and a command reading stdin cannot eat
 # the rest of a script piped into bash (as the timer of earlier installs still does).
@@ -310,7 +330,8 @@ main() {
   if $auto; then
     echo "photobooth updated from ${installed:-nothing} to $version and restarted; ${previous:-no earlier venv} is kept for rollback"
   else
-    echo "photobooth $tag installed; the kiosk starts at the next login or reboot"
+    echo "photobooth $tag installed and running"
+    start_kiosk
   fi
 }
 
