@@ -3,9 +3,11 @@ import logging
 from http import HTTPStatus
 from pathlib import Path
 
+from photobooth import reloader as reloader_module
 from photobooth.api import create_app
 from photobooth.reloader import CACHE_NAME, ConfigReloader
 from photobooth.session import BoothState, Screen
+from photobooth.store import CaptureStore
 
 LOCAL_BASE = "https://local.example.invalid/p"
 REMOTE_BASE = "https://remote.example.invalid/s"
@@ -123,10 +125,76 @@ async def test_an_unreachable_remote_at_startup_uses_the_cached_copy(tmp_path, r
     with caplog.at_level(logging.WARNING):
         rebooted = ConfigReloader(path)
 
-    assert (tmp_path / CACHE_NAME).is_file()
     assert (rebooted.settings.share_base_url, rebooted.settings.timings.countdown_s) == (REMOTE_BASE, 0.9)
     [warning] = warnings_logged(caplog)
-    assert remote.url in warning
+    assert "http://127.0.0.1" in warning
+    assert "photobooth.toml" not in warning
+
+
+async def test_an_invalid_remote_at_startup_uses_the_cached_copy(tmp_path, remote, caplog):
+    remote.serve(f'share_base_url = "{REMOTE_BASE}"\n[timings]\ncountdown_s = 0.9\n')
+    path = write(tmp_path / "config.toml", local_toml(f'remote_config_url = "{remote.url}"'))
+    ConfigReloader(path)
+    remote.serve('share_base_url = "https://changed.example.invalid/x"\n[timings]\ncountdwn_s = 2\n')
+
+    with caplog.at_level(logging.WARNING):
+        rebooted = ConfigReloader(path)
+
+    assert (rebooted.settings.share_base_url, rebooted.settings.timings.countdown_s) == (REMOTE_BASE, 0.9)
+    [warning] = warnings_logged(caplog)
+    assert "countdwn_s" in warning
+
+
+async def test_a_valid_local_edit_applies_while_the_remote_is_invalid(tmp_path, remote, caplog):
+    remote.serve(f'share_base_url = "{REMOTE_BASE}"\n')
+    path = write(tmp_path / "config.toml", local_toml(f'remote_config_url = "{remote.url}"'))
+    reloader = ConfigReloader(path)
+    remote.serve("[timings]\ncountdwn_s = 2\n")
+
+    with caplog.at_level(logging.WARNING):
+        write(path, local_toml(f'remote_config_url = "{remote.url}"', countdown_s=1.2, record_start_s=0.4))
+        await reloader.poll()
+        await reloader.poll()
+
+    assert (reloader.settings.share_base_url, reloader.settings.timings.countdown_s) == (REMOTE_BASE, 1.2)
+    [warning] = warnings_logged(caplog)
+    assert "countdwn_s" in warning
+
+
+async def test_the_cache_is_kept_in_the_media_state_directory_through_store_recovery(tmp_path, remote):
+    remote.serve(f'share_base_url = "{REMOTE_BASE}"\n')
+    ConfigReloader(write(tmp_path / "config.toml", local_toml(f'remote_config_url = "{remote.url}"')))
+    cache = tmp_path / "media" / ".state" / CACHE_NAME
+    assert cache.read_text(encoding="utf-8") == f'share_base_url = "{REMOTE_BASE}"\n'
+
+    store = CaptureStore(tmp_path / "media")
+    store.recover()
+    store.prune_clips(min_free_bytes=2**62)
+
+    assert cache.read_text(encoding="utf-8") == f'share_base_url = "{REMOTE_BASE}"\n'
+    assert not (tmp_path / CACHE_NAME).exists()
+
+
+async def test_an_unexpected_reload_error_is_logged_once_and_polling_continues(tmp_path, monkeypatch, caplog):
+    reloader = ConfigReloader(write(tmp_path / "config.toml", local_toml("config_poll_s = 0.02")))
+    calls = 0
+
+    def broken_load(_path):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(reloader_module, "load_config", broken_load)
+    with caplog.at_level(logging.WARNING):
+        polling = asyncio.create_task(reloader.run())
+        async with asyncio.timeout(5):
+            while calls < 4:
+                await asyncio.sleep(0.01)
+        polling.cancel()
+        await asyncio.wait({polling})
+
+    [warning] = warnings_logged(caplog)
+    assert "disk on fire" in warning
 
 
 async def test_a_port_change_needs_a_restart_while_a_timing_change_applies(tmp_path, caplog):

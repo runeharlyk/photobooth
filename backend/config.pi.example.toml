@@ -3,7 +3,8 @@ media_dir = "../media"
 
 # Optional: a TOML document whose share_base_url and [timings] override the values here and apply
 # without a restart. It is fetched every config_poll_s seconds; the last good copy is cached
-# beside this file as remote-config.cache.toml.
+# under media_dir as .state/remote-config.cache.toml. GitHub caches raw gist URLs for 5 minutes,
+# so an edit can take about 6 minutes to reach the booth.
 # remote_config_url = "https://gist.githubusercontent.com/<user>/<id>/raw/photobooth.toml"
 # config_poll_s = 60
 

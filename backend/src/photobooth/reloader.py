@@ -4,6 +4,7 @@ import logging
 import os
 import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -12,6 +13,7 @@ from pathlib import Path
 from photobooth.config import Config, LiveSettings, ignored_remote_keys, load_config, with_remote
 
 CACHE_NAME = "remote-config.cache.toml"
+STATE_DIR = ".state"
 FETCH_TIMEOUT_S = 10
 RESTART_FIELDS = ("camera", "media_dir", "host", "port", "remote_config_url", "config_poll_s")
 
@@ -23,20 +25,25 @@ class RemoteDocument:
     data: dict
     body: bytes
     etag: str | None
+    from_cache: bool = False
 
 
 class ConfigReloader:
     """Keeps LiveSettings in step with the local config file and the remote document it names.
 
     `config` stays as loaded at startup: the fields in RESTART_FIELDS are read from it once.
-    Each failure is logged when it first occurs, not again while it persists.
+    A remote document that fails validation is ignored in favour of the last good one, which
+    is cached under the media directory for the next boot. Each failure is logged when it
+    first occurs, not again while it persists. Logs name only the remote's scheme and host,
+    since the URL itself is the secret.
     """
 
     def __init__(self, path: Path) -> None:
         self.config = load_config(path)
         self.settings = LiveSettings(self.config.timings, self.config.share_base_url)
         self._path = path
-        self._cache = path.parent / CACHE_NAME
+        self._cache = self.config.media_dir / STATE_DIR / CACHE_NAME
+        self._remote_label = _scheme_and_host(self.config.remote_config_url or "")
         self._local = self.config
         self._remote: RemoteDocument | None = None
         self._failures: set[str] = set()
@@ -49,8 +56,8 @@ class ConfigReloader:
             await asyncio.sleep(self.config.config_poll_s)
             try:
                 await self.poll()
-            except Exception:
-                logger.exception("reloading the config failed")
+            except Exception as error:
+                self._fail(f"reloading the config failed: {error!r}", exc_info=True)
 
     async def poll(self) -> None:
         self._apply(await asyncio.to_thread(self._reload))
@@ -66,18 +73,36 @@ class ConfigReloader:
         remote = self._read_remote()
         if local == self._local and remote is self._remote:
             return None
+        settled = self._settle(local, remote)
+        if settled is None:
+            return None
+        effective, used = settled
+        if used is not None and used is not self._remote:
+            for key in ignored_remote_keys(used.data):
+                logger.warning("ignoring %r in the remote config: only share_base_url and [timings] apply", key)
+            if not used.from_cache:
+                self._write_cache(used.body)
+        self._note_restart(local)
+        self._local, self._remote = local, used
+        return effective
+
+    def _settle(self, local: Config, remote: RemoteDocument | None) -> tuple[Config, RemoteDocument | None] | None:
+        """The effective config and the remote document it uses, or None to keep the current settings."""
         try:
-            effective = with_remote(local, remote.data if remote else {})
+            return with_remote(local, _data(remote)), remote
+        except ValueError as error:
+            if remote is self._remote:
+                self._fail(f"keeping the current settings: {error}")
+                return None
+            self._fail(f"ignoring the remote config from {self._remote_label}: {error}")
+        fallback = self._remote if self._remote is not None else self._read_cache()
+        if fallback == remote:
+            fallback = None
+        try:
+            return with_remote(local, _data(fallback)), fallback
         except ValueError as error:
             self._fail(f"keeping the current settings: {error}")
             return None
-        if remote is not None and remote is not self._remote:
-            for key in ignored_remote_keys(remote.data):
-                logger.warning("ignoring %r in the remote config: only share_base_url and [timings] apply", key)
-            self._write_cache(remote.body)
-        self._note_restart(local)
-        self._local, self._remote = local, remote
-        return effective
 
     def _read_local(self) -> Config:
         try:
@@ -93,9 +118,9 @@ class ConfigReloader:
         try:
             return self._fetch(url)
         except (OSError, http.client.HTTPException) as error:
-            self._fail(f"could not fetch {url}: {error}")
+            self._fail(f"could not fetch the remote config from {self._remote_label}: {error}")
         except ValueError as error:
-            self._fail(f"could not parse {url}: {error}")
+            self._fail(f"could not parse the remote config from {self._remote_label}: {error}")
         return self._remote or self._read_cache()
 
     def _fetch(self, url: str) -> RemoteDocument | None:
@@ -120,8 +145,11 @@ class ConfigReloader:
             body = self._cache.read_bytes()
         except FileNotFoundError:
             return None
+        except OSError as error:
+            self._fail(f"could not read {self._cache}: {error}")
+            return None
         try:
-            return RemoteDocument(tomllib.loads(body.decode("utf-8")), body, None)
+            return RemoteDocument(tomllib.loads(body.decode("utf-8")), body, None, from_cache=True)
         except ValueError as error:
             self._fail(f"could not parse {self._cache}: {error}")
             return None
@@ -129,7 +157,11 @@ class ConfigReloader:
     def _write_cache(self, body: bytes) -> None:
         partial = self._cache.with_name(self._cache.name + ".partial")
         try:
-            partial.write_bytes(body)
+            self._cache.parent.mkdir(parents=True, exist_ok=True)
+            with partial.open("wb") as file:
+                file.write(body)
+                file.flush()
+                os.fsync(file.fileno())
             os.replace(partial, self._cache)
         except OSError as error:
             self._fail(f"could not cache the remote config in {self._cache}: {error}")
@@ -145,7 +177,16 @@ class ConfigReloader:
                 logger.warning("%s changed in %s and needs a restart to apply", name, self._path)
         self._restart_noted = changed
 
-    def _fail(self, message: str) -> None:
+    def _fail(self, message: str, exc_info: bool = False) -> None:
         self._failures.add(message)
         if message not in self._failures_seen:
-            logger.warning(message)
+            logger.warning(message, exc_info=exc_info)
+
+
+def _data(remote: RemoteDocument | None) -> dict:
+    return remote.data if remote is not None else {}
+
+
+def _scheme_and_host(url: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    return f"{parts.scheme}://{parts.hostname}"

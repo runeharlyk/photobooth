@@ -1,3 +1,4 @@
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -33,7 +34,9 @@ def test_defaults_fill_missing_keys(tmp_path):
     assert (config.remote_config_url, config.config_poll_s) == (None, 60.0)
 
 
-@pytest.mark.parametrize("top", ["config_poll_s = 0", 'config_poll_s = "60"', "remote_config_url = 1"])
+@pytest.mark.parametrize(
+    "top", ["config_poll_s = 0", "config_poll_s = nan", 'config_poll_s = "60"', "remote_config_url = 1"]
+)
 def test_reload_keys_are_validated(tmp_path, top):
     path = write_config(tmp_path / "config.toml", top + "\n" + MINIMAL)
 
@@ -61,10 +64,24 @@ def test_media_dir_relative_to_config_file(tmp_path):
     assert config.media_dir == tmp_path / "cfg" / "media"
 
 
-def test_a_non_numeric_timing_is_rejected(tmp_path):
-    path = write_config(tmp_path / "config.toml", MINIMAL + '\n[timings]\nflash_s = "2"\n')
+@pytest.mark.parametrize(
+    ("body", "named"),
+    [
+        (MINIMAL + '\n[timings]\nflash_s = "2"\n', "flash_s"),
+        (MINIMAL + "\n[timings]\ncountdown_s = nan\n", "countdown_s"),
+        (MINIMAL + "\n[timings]\nmessage_s = inf\n", "message_s"),
+        (MINIMAL + "\n[timings]\ndelete_window_s = -1\n", "delete_window_s"),
+        (MINIMAL + "\n[timings]\nflash_opacity = 1.5\n", "flash_opacity"),
+        (MINIMAL.replace('media_dir = "media"', "media_dir = 5"), "media_dir"),
+        ('port = "80"\n' + MINIMAL, "port"),
+        (MINIMAL.replace('kind = "fake"', 'kind = "webcam"'), "kind"),
+        (MINIMAL + 'framerate = "30"\n', "framerate"),
+    ],
+)
+def test_an_invalid_value_is_a_value_error_naming_the_key(tmp_path, body, named):
+    path = write_config(tmp_path / "config.toml", body)
 
-    with pytest.raises(ValueError, match="flash_s"):
+    with pytest.raises(ValueError, match=named):
         load_config(path)
 
 
@@ -106,6 +123,10 @@ def test_remote_keys_other_than_share_base_and_timings_are_named_and_not_applied
         ({"timings": {"countdwn_s": 2}}, "countdwn_s"),
         ({"timings": {"countdown_s": 0.5}}, "record_start_s"),
         ({"timings": {"countdown_s": "4"}}, "countdown_s"),
+        ({"timings": {"countdown_s": math.nan}}, "countdown_s"),
+        ({"timings": {"result_timeout_s": math.inf}}, "result_timeout_s"),
+        ({"timings": {"flash_s": -0.5}}, "flash_s"),
+        ({"timings": {"flash_opacity": 1.01}}, "flash_opacity"),
         ({"timings": 4}, "timings"),
         ({"share_base_url": 5}, "share_base_url"),
     ],
