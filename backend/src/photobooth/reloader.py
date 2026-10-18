@@ -3,18 +3,18 @@ import logging
 import os
 import tomllib
 import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
 
 from photobooth.config import Config, LiveSettings, ignored_remote_keys, load_config, with_remote
+from photobooth.redact import describe_failure, scheme_and_host
 
 CACHE_NAME = "remote-config.cache.toml"
 STATE_DIR = ".state"
 FETCH_TIMEOUT_S = 10
-RESTART_FIELDS = ("camera", "media_dir", "host", "port", "remote_config_url", "config_poll_s")
+RESTART_FIELDS = ("camera", "media_dir", "host", "port", "remote_config_url", "config_poll_s", "upload")
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class ConfigReloader:
         self.settings = LiveSettings(self.config.timings, self.config.share_base_url, self.config.event)
         self._path = path
         self._cache = self.config.media_dir / STATE_DIR / CACHE_NAME
-        self._remote_label = _scheme_and_host(self.config.remote_config_url or "")
+        self._remote_label = scheme_and_host(self.config.remote_config_url or "")
         self._local = self.config
         self._remote: RemoteDocument | None = None
         self._failures: set[str] = set()
@@ -118,7 +118,7 @@ class ConfigReloader:
         try:
             fetched = self._fetch(url)
         except Exception as error:  # urllib and http.client quote the secret URL in their messages
-            self._fail(f"could not fetch the remote config from {self._remote_label}: {_describe(error)}")
+            self._fail(f"could not fetch the remote config from {self._remote_label}: {describe_failure(error)}")
             return self._remote or self._read_cache()
         if fetched is None:
             return self._remote
@@ -191,18 +191,3 @@ class ConfigReloader:
 def _data(remote: RemoteDocument | None) -> dict:
     return remote.data if remote is not None else {}
 
-
-def _describe(error: Exception) -> str:
-    """Names a fetch failure without its message, which may quote the secret URL."""
-    if isinstance(error, urllib.error.HTTPError):
-        return f"HTTP {error.code}"
-    if isinstance(error, urllib.error.URLError) and isinstance(error.reason, BaseException):
-        return type(error.reason).__name__
-    return type(error).__name__
-
-
-def _scheme_and_host(url: str) -> str:
-    parts = urllib.parse.urlsplit(url)
-    if parts.scheme and parts.hostname:
-        return f"{parts.scheme}://{parts.hostname}"
-    return "a URL without a scheme and host"

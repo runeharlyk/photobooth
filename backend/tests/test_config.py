@@ -191,3 +191,95 @@ def test_an_invalid_remote_event_is_a_value_error_naming_the_key(local, event):
 
 def test_the_event_is_a_remote_key_so_it_is_not_reported_as_ignored():
     assert ignored_remote_keys({"event": "party", "port": 9000}) == ["port"]
+
+
+TOKEN = "s3cret-upload-token"
+UPLOAD = f'\n[upload]\nurl = "https://photo.runeharlyk.dk"\ntoken = "{TOKEN}"\n'
+
+
+def test_uploading_is_disabled_without_an_upload_table(tmp_path):
+    assert load_config(write_config(tmp_path / "config.toml", MINIMAL)).upload is None
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://photo.runeharlyk.dk", "https://photo.runeharlyk.dk"),
+        ("https://photo.runeharlyk.dk/", "https://photo.runeharlyk.dk"),
+        ("http://127.0.0.1:8787", "http://127.0.0.1:8787"),
+        ("http://localhost:8787/", "http://localhost:8787"),
+    ],
+)
+def test_the_upload_table_gives_the_origin_and_token(tmp_path, url, expected):
+    body = MINIMAL + f'\n[upload]\nurl = "{url}"\ntoken = "{TOKEN}"\n'
+
+    upload = load_config(write_config(tmp_path / "config.toml", body)).upload
+
+    assert (upload.url, upload.token) == (expected, TOKEN)
+
+
+def test_the_token_stays_out_of_the_config_repr(tmp_path):
+    config = load_config(write_config(tmp_path / "config.toml", MINIMAL + UPLOAD))
+
+    assert TOKEN not in repr(config)
+
+
+@pytest.mark.parametrize(
+    ("table", "named"),
+    [
+        (f'url = "http://photo.runeharlyk.dk"\ntoken = "{TOKEN}"', "url"),
+        (f'url = "http://192.168.1.5:8787"\ntoken = "{TOKEN}"', "url"),
+        (f'url = "ftp://photo.runeharlyk.dk"\ntoken = "{TOKEN}"', "url"),
+        (f'url = "https://photo.runeharlyk.dk/api"\ntoken = "{TOKEN}"', "url"),
+        (f'url = "https://photo.runeharlyk.dk/?key=1"\ntoken = "{TOKEN}"', "url"),
+        (f'url = "https://user:pw@photo.runeharlyk.dk"\ntoken = "{TOKEN}"', "url"),
+        (f'url = "https://photo.runeharlyk.dk:port"\ntoken = "{TOKEN}"', "url"),
+        (f'url = "https:///nohost"\ntoken = "{TOKEN}"', "url"),
+        (f'url = 5\ntoken = "{TOKEN}"', "url"),
+        (f'token = "{TOKEN}"', "url"),
+        ('url = "https://photo.runeharlyk.dk"', "token"),
+        ('url = "https://photo.runeharlyk.dk"\ntoken = ""', "token"),
+        ('url = "https://photo.runeharlyk.dk"\ntoken = 12345', "token"),
+        (f'url = "https://photo.runeharlyk.dk"\ntoken = "{TOKEN}"\ntokn = "x"', "tokn"),
+    ],
+)
+def test_an_invalid_upload_table_is_a_value_error_naming_the_key(tmp_path, table, named):
+    path = write_config(tmp_path / "config.toml", MINIMAL + f"\n[upload]\n{table}\n")
+
+    with pytest.raises(ValueError, match=named):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        f'url = "https://photo.runeharlyk.dk/{TOKEN}"\ntoken = "x"',
+        f'url = "https://photo.runeharlyk.dk/?t={TOKEN}"\ntoken = "x"',
+        f'url = "https://{TOKEN}@photo.runeharlyk.dk"\ntoken = "x"',
+        f'url = "https://photo.runeharlyk.dk"\ntoken = ["{TOKEN}"]',
+        f'url = "https://photo.runeharlyk.dk"\ntoken = "{TOKEN}"\nextra = "{TOKEN}"',
+    ],
+)
+def test_an_invalid_upload_table_never_quotes_the_secret(tmp_path, table):
+    path = write_config(tmp_path / "config.toml", MINIMAL + f"\n[upload]\n{table}\n")
+
+    with pytest.raises(ValueError) as raised:
+        load_config(path)
+
+    assert TOKEN not in str(raised.value)
+
+
+def test_an_upload_value_that_is_not_a_table_is_rejected_without_quoting_it(tmp_path):
+    path = write_config(tmp_path / "config.toml", f'upload = "{TOKEN}"\n' + MINIMAL)
+
+    with pytest.raises(ValueError, match="upload") as raised:
+        load_config(path)
+
+    assert TOKEN not in str(raised.value)
+
+
+def test_the_remote_document_cannot_set_the_upload_table(local):
+    document = {"upload": {"url": "https://evil.example.invalid", "token": "x"}}
+
+    assert ignored_remote_keys(document) == ["upload"]
+    assert with_remote(local, document).upload == local.upload

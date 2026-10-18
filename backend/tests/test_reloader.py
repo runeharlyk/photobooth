@@ -288,3 +288,37 @@ async def test_an_invalid_remote_event_keeps_the_current_event(tmp_path, remote,
     assert reloader.settings.event == "birthday-anna"
     [warning] = warnings_logged(caplog)
     assert "event" in warning
+
+
+UPLOAD_TOKEN = "s3cret-upload-token"
+
+
+def upload_table(url: str, token: str = UPLOAD_TOKEN) -> str:
+    return f'[upload]\nurl = "{url}"\ntoken = "{token}"\n'
+
+
+async def test_an_upload_change_needs_a_restart_and_keeps_the_token_out_of_the_log(tmp_path, caplog):
+    path = write(tmp_path / "config.toml", local_toml(upload_table("https://photo.runeharlyk.dk")))
+    reloader = ConfigReloader(path)
+    with caplog.at_level(logging.DEBUG):
+        write(path, local_toml(upload_table("https://photo.runeharlyk.dk", token="rotated-" + UPLOAD_TOKEN)))
+        await reloader.poll()
+        await reloader.poll()
+
+    assert reloader.config.upload.token == UPLOAD_TOKEN
+    [warning] = warnings_logged(caplog)
+    assert "upload" in warning
+    assert "restart" in warning
+    assert UPLOAD_TOKEN not in caplog.text
+
+
+async def test_a_remote_upload_table_is_ignored_with_a_warning(tmp_path, remote, caplog):
+    remote.serve(f'share_base_url = "{REMOTE_BASE}"\n' + upload_table("https://evil.example.invalid"))
+    with caplog.at_level(logging.WARNING):
+        reloader = ConfigReloader(write(tmp_path / "config.toml", local_toml(f'remote_config_url = "{remote.url}"')))
+
+    assert reloader.settings.share_base_url == REMOTE_BASE
+    assert reloader.config.upload is None
+    [warning] = warnings_logged(caplog)
+    assert "'upload'" in warning
+    assert UPLOAD_TOKEN not in caplog.text

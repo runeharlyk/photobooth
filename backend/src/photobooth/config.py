@@ -1,13 +1,18 @@
 import math
 import re
 import tomllib
-from dataclasses import dataclass, fields, replace
+import urllib.parse
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Literal, get_args, get_origin
+
+from photobooth.redact import scheme_and_host
 
 DEFAULT_EVENT = "kitchen"
 REMOTE_KEYS = {"share_base_url", "event", "timings"}
 _EVENT_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
+_UPLOAD_KEYS = ("url", "token")
+_PLAIN_HTTP_HOSTS = ("127.0.0.1", "localhost")
 TOP_LEVEL_TYPES = {
     "share_base_url": str,
     "event": str,
@@ -41,6 +46,14 @@ class Timings:
 
 
 @dataclass(frozen=True)
+class UploadConfig:
+    """Where kept captures are uploaded: the sharing Worker's origin and its bearer token."""
+
+    url: str
+    token: str = field(repr=False)
+
+
+@dataclass(frozen=True)
 class Config:
     camera: CameraConfig
     timings: Timings
@@ -51,6 +64,7 @@ class Config:
     remote_config_url: str | None = None
     config_poll_s: float = 60.0
     event: str = DEFAULT_EVENT
+    upload: UploadConfig | None = None
 
 
 @dataclass
@@ -66,6 +80,7 @@ def load_config(path: Path) -> Config:
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     camera_table = _table(data.pop("camera", {}), "[camera]")
     timings_table = _table(data.pop("timings", {}), "[timings]")
+    upload_table = data.pop("upload", None)
     _validate(data, TOP_LEVEL_TYPES, "top level")
     _validate(camera_table, _field_types(CameraConfig), "[camera]")
     _require(data, "share_base_url", "top level")
@@ -81,6 +96,7 @@ def load_config(path: Path) -> Config:
         timings=_timings(Timings(), timings_table),
         share_base_url=data["share_base_url"],
         media_dir=(path.parent / data["media_dir"]).resolve(),
+        upload=None if upload_table is None else _upload(upload_table),
         **{key: data[key] for key in ("event", "host", "port", "remote_config_url", "config_poll_s") if key in data},
     )
 
@@ -97,6 +113,38 @@ def with_remote(config: Config, document: dict) -> Config:
 
 def ignored_remote_keys(document: dict) -> list[str]:
     return sorted(set(document) - REMOTE_KEYS)
+
+
+def _upload(table: object) -> UploadConfig:
+    """Validates [upload] without quoting its values: the token is secret, and so may be anything in the URL."""
+    if not isinstance(table, dict):
+        raise ValueError("upload must be a table")
+    unknown = sorted(set(table) - set(_UPLOAD_KEYS))
+    if unknown:
+        raise ValueError(f"unknown key {unknown[0]!r} in [upload]")
+    for key in _UPLOAD_KEYS:
+        _require(table, key, "[upload]")
+    url, token = table["url"], table["token"]
+    if not isinstance(url, str) or not _is_upload_origin(url):
+        shown = scheme_and_host(url) if isinstance(url, str) else "a value that is not a string"
+        raise ValueError(
+            f"url in [upload] must be an https:// origin (http:// only for 127.0.0.1 or localhost) "
+            f"with no path, query or credentials, not {shown}"
+        )
+    if not isinstance(token, str) or not token:
+        raise ValueError("token in [upload] must be a non-empty string")
+    return UploadConfig(url.rstrip("/"), token)
+
+
+def _is_upload_origin(url: str) -> bool:
+    parts = urllib.parse.urlsplit(url)
+    try:
+        parts.port
+    except ValueError:
+        return False
+    secure = parts.scheme == "https" or (parts.scheme == "http" and parts.hostname in _PLAIN_HTTP_HOSTS)
+    bare = parts.path in ("", "/") and not (parts.query or parts.fragment or parts.username or parts.password)
+    return secure and bool(parts.hostname) and bare
 
 
 def _timings(base: Timings, table: dict) -> Timings:
