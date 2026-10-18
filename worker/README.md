@@ -54,7 +54,8 @@ curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
 ```
 
 Each entry's `pattern` must not match `photo.runeharlyk.dk`; a leading `*` matches any subdomain.
-In the dashboard, the routes are listed per Worker under Workers & Pages > the Worker > Settings > Domains & Routes, so every Worker on the account must be checked there.
+This call is the check, since it returns every route on the zone in one response.
+As an alternative, the dashboard shows each Worker's routes under Workers & Pages > the Worker > Settings > Domains & Routes.
 If a matching route exists, narrow its pattern to the hostnames it serves before deploying.
 
 ### Deploy

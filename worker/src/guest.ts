@@ -32,7 +32,9 @@ async function readStatus(bucket: R2Bucket, id: string): Promise<Status> {
     exists(mediaKey(id, 'boomerang.mp4')),
     exists(mediaKey(id, 'video.mp4')),
   ])
-  return { photo, boomerang, video, expired: !photo && (await exists(markerKey(id))) }
+  if (photo || !(await exists(markerKey(id)))) return { photo, boomerang, video, expired: false }
+  const arrivedMeanwhile = await exists(mediaKey(id, 'photo.jpg'))
+  return { photo: arrivedMeanwhile, boomerang, video, expired: !arrivedMeanwhile }
 }
 
 async function status(bucket: R2Bucket, id: string): Promise<Response> {

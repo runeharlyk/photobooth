@@ -1,7 +1,7 @@
 import { CONTENT_TYPES, isId, isName, markerKey, mediaKey, type Name } from './capture'
 
 const BEARER = /^Bearer (.+)$/i
-const EVENT =/^[a-z0-9][a-z0-9-]{0,39}$/
+const EVENT = /^[a-z0-9][a-z0-9-]{0,39}$/
 const UTC_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|\+00:00)$/
 
 export async function handleUpload(request: Request, env: Env, id: string, name: string): Promise<Response> {

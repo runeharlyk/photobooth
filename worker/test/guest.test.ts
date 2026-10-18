@@ -141,12 +141,45 @@ describe('guest storage operations', () => {
     }
   })
 
-  it('heads the marker only while the photo is absent', async () => {
+  it('heads the marker only while the photo is absent, and the photo again before reporting expired', async () => {
     const waiting = newId()
     expect(await operations(`/p/${waiting}/status`)).toEqual(['head', 'head', 'head', 'head'])
     const ready = newId()
     await seed(ready, ['photo.jpg'])
     expect(await operations(`/p/${ready}/status`)).toEqual(['head', 'head', 'head'])
+    const expired = newId()
+    await seed(expired, ['photo.jpg'])
+    await expire(expired)
+    expect(await operations(`/p/${expired}/status`)).toEqual(['head', 'head', 'head', 'head', 'head'])
+  })
+
+  function uploadingBeforeMarkerRead(id: string): Env {
+    const shares = new Proxy(env.SHARES, {
+      get(target, property) {
+        if (property !== 'head') return Reflect.get(target, property, target)
+        return async (key: string) => {
+          if (key === `markers/${id}`) await seed(id, ['photo.jpg'])
+          return target.head(key)
+        }
+      },
+    })
+    return { ...env, SHARES: shares }
+  }
+
+  async function fetchDuringFirstUpload(id: string, path: string): Promise<string> {
+    const request = new Request<unknown, IncomingRequestCfProperties>(`${ORIGIN}${path}`)
+    return (await worker.fetch(request, uploadingBeforeMarkerRead(id))).text()
+  }
+
+  it('does not report expired when the first upload lands between the photo and marker reads', async () => {
+    const id = newId()
+    const body = await fetchDuringFirstUpload(id, `/p/${id}/status`)
+    expect(JSON.parse(body)).toEqual({ photo: true, boomerang: false, video: false, expired: false })
+  })
+
+  it('renders the ready page when the first upload lands between the photo and marker reads', async () => {
+    const id = newId()
+    expect(visibleSections(await fetchDuringFirstUpload(id, `/p/${id}`))).toEqual(['ready'])
   })
 })
 
