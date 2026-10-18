@@ -15,3 +15,10 @@ media_dir = "../media"
 [camera]
 kind = "ffmpeg"
 device = "Innomaker-U20CAM-1080p-S1"
+
+# Optional: upload kept captures to the sharing Worker behind share_base_url. Read only at
+# startup and never from the remote config; without this table nothing is uploaded.
+# The token must match the Worker's UPLOAD_TOKEN secret and is never logged.
+# [upload]
+# url = "https://photo.runeharlyk.dk"
+# token = "<the Worker's UPLOAD_TOKEN>"
