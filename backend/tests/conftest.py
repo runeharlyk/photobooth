@@ -44,7 +44,7 @@ async def make_booth(camera, store, fast_timings):
     booths: list[Booth] = []
 
     def make(booth_camera=None, timings: Timings | None = None, settings: LiveSettings | None = None) -> Booth:
-        settings = settings or LiveSettings(timings or fast_timings, "https://photo.example.invalid/p")
+        settings = settings or LiveSettings(timings or fast_timings, "https://photo.example.invalid/p", "kitchen")
         booth = Booth(booth_camera or camera, store, settings)
         booths.append(booth)
         return booth

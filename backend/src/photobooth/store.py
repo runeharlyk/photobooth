@@ -17,6 +17,7 @@ VIDEO = "video.mp4"
 META = "capture.json"
 PUBLIC_FILES = (PHOTO, BOOMERANG, VIDEO)
 CLIP_KEEP_FREE_BYTES = 5 * 1024**3
+LEGACY_EVENT = "kitchen"
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class CaptureMeta:
     state: CaptureState
     uploaded: bool
     clip_fps: float
+    event: str
 
 
 class CaptureStore:
@@ -55,6 +57,7 @@ class CaptureStore:
         photo: bytes,
         clip_frames: Sequence[bytes],
         clip_fps: float,
+        event: str,
     ) -> None:
         target = self._dir(capture_id)
         staging = self.root / f"{_TMP_PREFIX}{capture_id}"
@@ -67,6 +70,7 @@ class CaptureStore:
             state=CaptureState.PENDING,
             uploaded=False,
             clip_fps=clip_fps,
+            event=event,
         )
         _write_durably(staging / META, [_dump(meta).encode("utf-8")])
         os.rename(staging, target)
@@ -91,6 +95,7 @@ class CaptureStore:
     def meta(self, capture_id: str) -> CaptureMeta:
         data = json.loads(self.path(capture_id, META).read_text(encoding="utf-8"))
         data["state"] = CaptureState(data["state"])
+        data.setdefault("event", LEGACY_EVENT)
         return CaptureMeta(**data)
 
     def keep(self, capture_id: str) -> None:

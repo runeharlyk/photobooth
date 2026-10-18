@@ -55,8 +55,8 @@ class Booth:
 
     State transitions and the camera's start, stop and capture_still run under one lock.
     _tick and next_frame run unlocked: FrameHub is thread-safe, and no other camera call
-    can run during COUNTDOWN. Each countdown takes the timings current when it begins and keeps
-    them through its capture, so a reload never changes a capture in progress.
+    can run during COUNTDOWN. Each countdown takes the timings and event current when it begins and
+    keeps them through its capture, so a reload never changes a capture in progress.
     """
 
     def __init__(self, camera: Camera, store: CaptureStore, settings: LiveSettings) -> None:
@@ -160,11 +160,11 @@ class Booth:
         if fault:
             self._set_state(BoothState(Screen.IDLE, fault=fault))
             return
-        timings = self._settings.timings
+        timings, event = self._settings.timings, self._settings.event
         self._set_state(BoothState(Screen.COUNTDOWN, remaining=math.ceil(timings.countdown_s)))
-        self._countdown = asyncio.create_task(self._count_down(time.monotonic(), timings))
+        self._countdown = asyncio.create_task(self._count_down(time.monotonic(), timings, event))
 
-    async def _count_down(self, began: float, timings: Timings) -> None:
+    async def _count_down(self, began: float, timings: Timings, event: str) -> None:
         try:
             frames = await self._run_countdown(began, timings)
         except Exception:
@@ -173,7 +173,7 @@ class Booth:
         async with self._lock:
             if frames is not None:
                 try:
-                    await self._shoot(frames, timings)
+                    await self._shoot(frames, timings, event)
                     return
                 except Exception:
                     logger.exception("capture failed")
@@ -211,13 +211,13 @@ class Booth:
                 frames.append(frame)
         return frames
 
-    async def _shoot(self, frames: list[Frame], timings: Timings) -> None:
+    async def _shoot(self, frames: list[Frame], timings: Timings, event: str) -> None:
         self._update(screen=Screen.CAPTURING, remaining=None)
         clip = [frame.jpeg for frame in frames]
         fps = _measure_fps(frames)
         capture_id = self._store.new_id()
         photo = await asyncio.to_thread(self._camera.capture_still)
-        await asyncio.to_thread(self._store.create, capture_id, photo, clip, fps)
+        await asyncio.to_thread(self._store.create, capture_id, photo, clip, fps, event)
         await asyncio.to_thread(self._camera.stop)
         self._set_state(BoothState(Screen.RESULT, capture_id=capture_id, delete_available=True))
         self._schedule(_DELETE_WINDOW, timings.delete_window_s, self._keep_current)

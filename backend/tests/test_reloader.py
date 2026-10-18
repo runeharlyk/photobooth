@@ -247,3 +247,44 @@ async def test_shutdown_cancels_the_reloader_without_warnings(tmp_path, remote, 
 
     assert len(remote.requests) == polled
     assert warnings_logged(caplog) == []
+
+
+async def test_a_remote_event_applies_from_the_next_capture(tmp_path, remote, make_booth, store, await_screen):
+    path = write(tmp_path / "config.toml", local_toml(f'remote_config_url = "{remote.url}"'))
+    reloader = ConfigReloader(path)
+    booth = make_booth(settings=reloader.settings)
+    await booth.start()
+
+    await booth.tap()
+    before = await await_screen(booth, Screen.RESULT)
+    remote.serve('event = "birthday-anna"\n')
+    await reloader.poll()
+    await booth.new_photo()
+    after = await await_screen(booth, Screen.RESULT)
+
+    assert store.meta(before.capture_id).event == "kitchen"
+    assert store.meta(after.capture_id).event == "birthday-anna"
+
+
+async def test_a_local_event_edit_applies_live(tmp_path):
+    path = write(tmp_path / "config.toml", local_toml('event = "wedding"'))
+    reloader = ConfigReloader(path)
+    assert reloader.settings.event == "wedding"
+
+    write(path, local_toml('event = "birthday-anna"'))
+    await reloader.poll()
+
+    assert reloader.settings.event == "birthday-anna"
+
+
+async def test_an_invalid_remote_event_keeps_the_current_event(tmp_path, remote, caplog):
+    remote.serve('event = "birthday-anna"\n')
+    reloader = ConfigReloader(write(tmp_path / "config.toml", local_toml(f'remote_config_url = "{remote.url}"')))
+    remote.serve('event = "Birthday Anna"\n')
+
+    with caplog.at_level(logging.WARNING):
+        await reloader.poll()
+
+    assert reloader.settings.event == "birthday-anna"
+    [warning] = warnings_logged(caplog)
+    assert "event" in warning

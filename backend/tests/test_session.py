@@ -575,10 +575,40 @@ async def test_unusable_media_root_degrades_to_a_fault(tmp_path, camera, fast_ti
 
     store = CaptureStore(blocker / "media")
     store.recover()
-    booth = Booth(camera, store, LiveSettings(fast_timings, "https://photo.example.invalid/p"))
+    booth = Booth(camera, store, LiveSettings(fast_timings, "https://photo.example.invalid/p", "kitchen"))
     await booth.start()
 
     assert booth.state.fault == "Cannot save photos"
     await booth.tap()
     assert booth.state.screen is Screen.IDLE
     assert camera.running is False
+
+
+async def test_a_capture_carries_the_event_current_when_it_was_made(make_booth, store, fast_timings, await_screen):
+    settings = LiveSettings(fast_timings, "https://photo.example.invalid/p", "kitchen")
+    booth = make_booth(settings=settings)
+    await booth.start()
+
+    await booth.tap()
+    before = await await_screen(booth, Screen.RESULT)
+    settings.event = "birthday-anna"
+    await booth.new_photo()
+    after = await await_screen(booth, Screen.RESULT)
+
+    assert after.capture_id != before.capture_id
+    assert store.meta(before.capture_id).event == "kitchen"
+    assert store.meta(after.capture_id).event == "birthday-anna"
+
+
+async def test_an_event_change_during_a_countdown_does_not_restamp_that_capture(
+    make_booth, store, fast_timings, await_screen
+):
+    settings = LiveSettings(fast_timings, "https://photo.example.invalid/p", "kitchen")
+    booth = make_booth(settings=settings)
+    await booth.start()
+
+    await booth.tap()
+    settings.event = "birthday-anna"
+    result = await await_screen(booth, Screen.RESULT)
+
+    assert store.meta(result.capture_id).event == "kitchen"

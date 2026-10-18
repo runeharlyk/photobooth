@@ -137,3 +137,57 @@ def test_remote_keys_other_than_share_base_and_timings_are_named_and_not_applied
 def test_remote_settings_are_validated_like_the_local_file(local, document, named):
     with pytest.raises(ValueError, match=named):
         with_remote(local, document)
+
+
+VALID_EVENTS = ["kitchen", "a", "7", "party-", "birthday-anna", "9-lives", "a" * 40]
+INVALID_EVENTS = ["", "Party", "party night", "party_night", "-party", "a" * 41, "caf\u00e9", "party\n", "\u0664"]
+
+
+def test_the_event_defaults_to_the_kitchen(tmp_path):
+    config = load_config(write_config(tmp_path / "config.toml", MINIMAL))
+
+    assert config.event == "kitchen"
+
+
+@pytest.mark.parametrize("event", VALID_EVENTS)
+def test_a_valid_event_is_read_from_the_local_file(tmp_path, event):
+    config = load_config(write_config(tmp_path / "config.toml", f'event = "{event}"\n' + MINIMAL))
+
+    assert config.event == event
+
+
+@pytest.mark.parametrize("event", [e for e in INVALID_EVENTS if e != "party\n"])
+def test_an_invalid_event_in_the_local_file_is_a_value_error_naming_the_key(tmp_path, event):
+    path = write_config(tmp_path / "config.toml", f'event = "{event}"\n' + MINIMAL)
+
+    with pytest.raises(ValueError, match="event"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("literal", ['"party\\n"', "5", "true", '["party"]'])
+def test_an_event_that_is_not_a_clean_string_in_the_local_file_is_a_value_error(tmp_path, literal):
+    path = write_config(tmp_path / "config.toml", f"event = {literal}\n" + MINIMAL)
+
+    with pytest.raises(ValueError, match="event"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("event", VALID_EVENTS)
+def test_a_valid_remote_event_overrides_the_local_one(local, event):
+    assert with_remote(local, {"event": event}).event == event
+
+
+def test_a_remote_without_an_event_keeps_the_local_one(tmp_path):
+    local = load_config(write_config(tmp_path / "config.toml", 'event = "wedding"\n' + MINIMAL))
+
+    assert with_remote(local, {"share_base_url": "https://remote.example.invalid/s"}).event == "wedding"
+
+
+@pytest.mark.parametrize("event", [*INVALID_EVENTS, 5, True, ["party"]])
+def test_an_invalid_remote_event_is_a_value_error_naming_the_key(local, event):
+    with pytest.raises(ValueError, match="event"):
+        with_remote(local, {"event": event})
+
+
+def test_the_event_is_a_remote_key_so_it_is_not_reported_as_ignored():
+    assert ignored_remote_keys({"event": "party", "port": 9000}) == ["port"]

@@ -39,7 +39,7 @@ class ConfigReloader:
 
     def __init__(self, path: Path) -> None:
         self.config = load_config(path)
-        self.settings = LiveSettings(self.config.timings, self.config.share_base_url)
+        self.settings = LiveSettings(self.config.timings, self.config.share_base_url, self.config.event)
         self._path = path
         self._cache = self.config.media_dir / STATE_DIR / CACHE_NAME
         self._remote_label = _scheme_and_host(self.config.remote_config_url or "")
@@ -65,6 +65,7 @@ class ConfigReloader:
         if effective is not None:
             self.settings.timings = effective.timings
             self.settings.share_base_url = effective.share_base_url
+            self.settings.event = effective.event
 
     def _reload(self) -> Config | None:
         self._failures_seen, self._failures = self._failures, set()
@@ -78,7 +79,7 @@ class ConfigReloader:
         effective, used = settled
         if used is not None and used is not self._remote:
             for key in ignored_remote_keys(used.data):
-                logger.warning("ignoring %r in the remote config: only share_base_url and [timings] apply", key)
+                logger.warning("ignoring %r in the remote config: only share_base_url, event and [timings] apply", key)
             if not used.from_cache:
                 self._write_cache(used.body)
         self._note_restart(local)

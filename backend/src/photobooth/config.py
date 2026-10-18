@@ -1,12 +1,16 @@
 import math
+import re
 import tomllib
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Literal, get_args, get_origin
 
-REMOTE_KEYS = {"share_base_url", "timings"}
+DEFAULT_EVENT = "kitchen"
+REMOTE_KEYS = {"share_base_url", "event", "timings"}
+_EVENT_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 TOP_LEVEL_TYPES = {
     "share_base_url": str,
+    "event": str,
     "media_dir": str,
     "host": str,
     "port": int,
@@ -46,6 +50,7 @@ class Config:
     port: int = 8000
     remote_config_url: str | None = None
     config_poll_s: float = 60.0
+    event: str = DEFAULT_EVENT
 
 
 @dataclass
@@ -54,6 +59,7 @@ class LiveSettings:
 
     timings: Timings
     share_base_url: str
+    event: str
 
 
 def load_config(path: Path) -> Config:
@@ -67,22 +73,26 @@ def load_config(path: Path) -> Config:
     _require(camera_table, "kind", "[camera]")
     if "config_poll_s" in data and not (math.isfinite(data["config_poll_s"]) and data["config_poll_s"] > 0):
         raise ValueError(f"config_poll_s must be a positive finite number, not {data['config_poll_s']!r}")
+    if "event" in data:
+        _check_event(data["event"], "top level")
 
     return Config(
         camera=CameraConfig(**camera_table),
         timings=_timings(Timings(), timings_table),
         share_base_url=data["share_base_url"],
         media_dir=(path.parent / data["media_dir"]).resolve(),
-        **{key: data[key] for key in ("host", "port", "remote_config_url", "config_poll_s") if key in data},
+        **{key: data[key] for key in ("event", "host", "port", "remote_config_url", "config_poll_s") if key in data},
     )
 
 
 def with_remote(config: Config, document: dict) -> Config:
-    """The config with the share base and timings of a remote document laid over it."""
+    """The config with the share base, event and timings of a remote document laid over it."""
     share_base_url = document.get("share_base_url", config.share_base_url)
     _check("share_base_url", share_base_url, str, "top level")
+    event = document.get("event", config.event)
+    _check_event(event, "top level")
     timings = _timings(config.timings, _table(document.get("timings", {}), "[timings]"))
-    return replace(config, share_base_url=share_base_url, timings=timings)
+    return replace(config, share_base_url=share_base_url, event=event, timings=timings)
 
 
 def ignored_remote_keys(document: dict) -> list[str]:
@@ -103,6 +113,15 @@ def _timings(base: Timings, table: dict) -> Timings:
             f"countdown_s ({timings.countdown_s})"
         )
     return timings
+
+
+def _check_event(value: object, where: str) -> None:
+    _check("event", value, str, where)
+    if not _EVENT_PATTERN.fullmatch(value):
+        raise ValueError(
+            f"event in {where} must be 1-40 lowercase letters, digits or hyphens, "
+            f"starting with a letter or digit, not {value!r}"
+        )
 
 
 def _validate(table: dict, types: dict[str, object], where: str) -> None:

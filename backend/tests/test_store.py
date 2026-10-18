@@ -29,7 +29,7 @@ def test_create_writes_complete_capture(store: CaptureStore):
     capture_id = store.new_id()
     frames = [b"frame-one", b"frame-two", b"frame-three"]
 
-    store.create(capture_id, b"jpeg-bytes", frames, 17.25)
+    store.create(capture_id, b"jpeg-bytes", frames, 17.25, "kitchen")
 
     assert store.exists(capture_id)
     assert store.path(capture_id, PHOTO).read_bytes() == b"jpeg-bytes"
@@ -46,7 +46,7 @@ def test_create_writes_complete_capture(store: CaptureStore):
 
 def test_keep_and_delete(store: CaptureStore):
     capture_id = store.new_id()
-    store.create(capture_id, b"photo", [b"f"], 10.0)
+    store.create(capture_id, b"photo", [b"f"], 10.0, "kitchen")
 
     store.keep(capture_id)
     assert store.meta(capture_id).state == CaptureState.KEPT
@@ -59,7 +59,7 @@ def test_keep_and_delete(store: CaptureStore):
 
 def test_recover_removes_partial_and_keeps_pending(store: CaptureStore):
     pending_id = store.new_id()
-    store.create(pending_id, b"photo", [b"f"], 10.0)
+    store.create(pending_id, b"photo", [b"f"], 10.0, "kitchen")
     partial = store.root / ".tmp-x"
     partial.mkdir()
     (partial / PHOTO).write_bytes(b"half")
@@ -80,7 +80,7 @@ def test_rejects_path_traversal_ids(store: CaptureStore, bad_id: str):
 
 def test_put_file_replaces_atomically(store: CaptureStore, tmp_path: Path):
     capture_id = store.new_id()
-    store.create(capture_id, b"photo", [b"f"], 10.0)
+    store.create(capture_id, b"photo", [b"f"], 10.0, "kitchen")
     first = tmp_path / "first.mp4"
     second = tmp_path / "second.mp4"
     first.write_bytes(b"first")
@@ -103,7 +103,7 @@ def test_put_file_fsyncs_the_capture_directory_on_posix_only(
     store: CaptureStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, os_name: str, synced: bool
 ):
     capture_id = store.new_id()
-    store.create(capture_id, b"photo", [b"f"], 10.0)
+    store.create(capture_id, b"photo", [b"f"], 10.0, "kitchen")
     source = tmp_path / "video.mp4"
     source.write_bytes(b"video")
     synced_directories: list[Path] = []
@@ -120,7 +120,7 @@ def test_put_file_survives_a_failing_directory_fsync(
     store: CaptureStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ):
     capture_id = store.new_id()
-    store.create(capture_id, b"photo", [b"f"], 10.0)
+    store.create(capture_id, b"photo", [b"f"], 10.0, "kitchen")
     source = tmp_path / "video.mp4"
     source.write_bytes(b"video")
 
@@ -161,7 +161,7 @@ def test_recover_removes_capture_with_unreadable_metadata(
 ):
     broken_id = _make_id_dir(store, files)
     pending_id = store.new_id()
-    store.create(pending_id, b"photo", [b"f"], 10.0)
+    store.create(pending_id, b"photo", [b"f"], 10.0, "kitchen")
     partial = store.root / ".tmp-leftover"
     partial.mkdir()
 
@@ -189,7 +189,7 @@ def test_create_fsyncs_every_file_before_the_rename(
     monkeypatch.setattr(os, "fsync", spy_fsync)
     monkeypatch.setattr(os, "rename", spy_rename)
 
-    store.create(store.new_id(), b"photo", [b"a", b"b"], 10.0)
+    store.create(store.new_id(), b"photo", [b"a", b"b"], 10.0, "kitchen")
 
     assert events[:4] == ["fsync", "fsync", "fsync", "rename"]
 
@@ -198,7 +198,7 @@ def test_keep_fsyncs_metadata_before_replacing_it(
     store: CaptureStore, monkeypatch: pytest.MonkeyPatch
 ):
     capture_id = store.new_id()
-    store.create(capture_id, b"photo", [b"f"], 10.0)
+    store.create(capture_id, b"photo", [b"f"], 10.0, "kitchen")
     events: list[str] = []
     real_fsync, real_replace = os.fsync, os.replace
 
@@ -222,9 +222,9 @@ def test_recover_leaves_capture_with_transiently_unreadable_metadata(
     store: CaptureStore, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ):
     locked_id = store.new_id()
-    store.create(locked_id, b"photo", [b"f"], 10.0)
+    store.create(locked_id, b"photo", [b"f"], 10.0, "kitchen")
     pending_id = store.new_id()
-    store.create(pending_id, b"photo", [b"f"], 10.0)
+    store.create(pending_id, b"photo", [b"f"], 10.0, "kitchen")
     real_meta = store.meta
 
     def locked_meta(capture_id: str):
@@ -249,7 +249,7 @@ def test_recover_continues_when_removal_fails(
     stuck = store.root / ".tmp-stuck"
     stuck.mkdir()
     pending_id = store.new_id()
-    store.create(pending_id, b"photo", [b"f"], 10.0)
+    store.create(pending_id, b"photo", [b"f"], 10.0, "kitchen")
     real_rmtree = shutil.rmtree
 
     def failing_rmtree(path, *args, **kwargs):
@@ -275,7 +275,7 @@ def _capture(
     store: CaptureStore, captured_at: str, built: tuple[str, ...] = (BOOMERANG, VIDEO)
 ) -> str:
     capture_id = store.new_id()
-    store.create(capture_id, b"photo", [b"c" * CLIP_BYTES], 10.0)
+    store.create(capture_id, b"photo", [b"c" * CLIP_BYTES], 10.0, "kitchen")
     meta_path = store.path(capture_id, META)
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     meta["captured_at"] = captured_at
@@ -411,3 +411,50 @@ def test_prune_returns_nothing_when_the_media_directory_is_unusable(store: Captu
     shutil.rmtree(store.root)
 
     assert store.prune_clips(THRESHOLD) == []
+
+
+def test_create_stamps_the_event_in_the_metadata(store: CaptureStore):
+    capture_id = store.new_id()
+
+    store.create(capture_id, b"photo", [b"f"], 10.0, "birthday-anna")
+
+    assert store.meta(capture_id).event == "birthday-anna"
+    stored = json.loads(store.path(capture_id, META).read_text(encoding="utf-8"))
+    assert stored["event"] == "birthday-anna"
+
+
+def _without_event(store: CaptureStore, capture_id: str) -> None:
+    meta_path = store.path(capture_id, META)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    del meta["event"]
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+
+def test_a_capture_made_before_events_reads_as_kitchen(store: CaptureStore):
+    capture_id = store.new_id()
+    store.create(capture_id, b"photo", [b"f"], 10.0, "party")
+    _without_event(store, capture_id)
+
+    assert store.meta(capture_id).event == "kitchen"
+
+
+def test_recover_keeps_and_keeps_marking_a_capture_made_before_events(store: CaptureStore):
+    capture_id = store.new_id()
+    store.create(capture_id, b"photo", [b"f"], 10.0, "party")
+    _without_event(store, capture_id)
+
+    store.recover()
+
+    assert store.exists(capture_id)
+    assert store.meta(capture_id).state == CaptureState.KEPT
+    assert store.meta(capture_id).event == "kitchen"
+
+
+def test_prune_deletes_the_clip_of_a_capture_made_before_events(
+    store: CaptureStore, monkeypatch: pytest.MonkeyPatch
+):
+    capture_id = _capture(store, "2026-10-01T10:00:00+00:00")
+    _without_event(store, capture_id)
+    _free_space(store, monkeypatch, 0)
+
+    assert store.prune_clips(THRESHOLD) == [capture_id]
