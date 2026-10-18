@@ -1,5 +1,4 @@
 import asyncio
-import http.client
 import logging
 import os
 import tomllib
@@ -116,29 +115,34 @@ class ConfigReloader:
         if url is None:
             return None
         try:
-            return self._fetch(url)
-        except (OSError, http.client.HTTPException) as error:
-            self._fail(f"could not fetch the remote config from {self._remote_label}: {error}")
+            fetched = self._fetch(url)
+        except Exception as error:  # urllib and http.client quote the secret URL in their messages
+            self._fail(f"could not fetch the remote config from {self._remote_label}: {_describe(error)}")
+            return self._remote or self._read_cache()
+        if fetched is None:
+            return self._remote
+        body, etag = fetched
+        if self._remote is not None and body == self._remote.body:
+            return self._remote
+        try:
+            return RemoteDocument(tomllib.loads(body.decode("utf-8")), body, etag)
         except ValueError as error:
             self._fail(f"could not parse the remote config from {self._remote_label}: {error}")
-        return self._remote or self._read_cache()
+            return self._remote or self._read_cache()
 
-    def _fetch(self, url: str) -> RemoteDocument | None:
+    def _fetch(self, url: str) -> tuple[bytes, str | None] | None:
+        """The body and ETag of the remote document, or None when the server answers 304."""
         request = urllib.request.Request(url)
         if self._remote is not None and self._remote.etag is not None:
             request.add_header("If-None-Match", self._remote.etag)
         try:
             with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT_S) as response:
-                body = response.read()
-                etag = response.headers.get("ETag")
+                return response.read(), response.headers.get("ETag")
         except urllib.error.HTTPError as error:
             error.close()
             if error.code == HTTPStatus.NOT_MODIFIED:
-                return self._remote
+                return None
             raise
-        if self._remote is not None and body == self._remote.body:
-            return self._remote
-        return RemoteDocument(tomllib.loads(body.decode("utf-8")), body, etag)
 
     def _read_cache(self) -> RemoteDocument | None:
         try:
@@ -187,6 +191,17 @@ def _data(remote: RemoteDocument | None) -> dict:
     return remote.data if remote is not None else {}
 
 
+def _describe(error: Exception) -> str:
+    """Names a fetch failure without its message, which may quote the secret URL."""
+    if isinstance(error, urllib.error.HTTPError):
+        return f"HTTP {error.code}"
+    if isinstance(error, urllib.error.URLError) and isinstance(error.reason, BaseException):
+        return type(error.reason).__name__
+    return type(error).__name__
+
+
 def _scheme_and_host(url: str) -> str:
     parts = urllib.parse.urlsplit(url)
-    return f"{parts.scheme}://{parts.hostname}"
+    if parts.scheme and parts.hostname:
+        return f"{parts.scheme}://{parts.hostname}"
+    return "a URL without a scheme and host"

@@ -3,6 +3,8 @@ import logging
 from http import HTTPStatus
 from pathlib import Path
 
+import pytest
+
 from photobooth import reloader as reloader_module
 from photobooth.api import create_app
 from photobooth.reloader import CACHE_NAME, ConfigReloader
@@ -129,6 +131,21 @@ async def test_an_unreachable_remote_at_startup_uses_the_cached_copy(tmp_path, r
     [warning] = warnings_logged(caplog)
     assert "http://127.0.0.1" in warning
     assert "photobooth.toml" not in warning
+
+
+@pytest.mark.parametrize(
+    "url", ["gist.example.invalid/secret-id/raw/photobooth.toml", "{server}/secret id/photobooth.toml"]
+)
+async def test_a_malformed_remote_url_stays_out_of_the_log(tmp_path, remote, caplog, url):
+    url = url.format(server=remote.url.rsplit("/", 1)[0])
+
+    with caplog.at_level(logging.WARNING):
+        reloader = ConfigReloader(write(tmp_path / "config.toml", local_toml(f'remote_config_url = "{url}"')))
+
+    assert reloader.settings.share_base_url == LOCAL_BASE
+    [warning] = warnings_logged(caplog)
+    assert "secret" not in warning
+    assert "None" not in warning
 
 
 async def test_an_invalid_remote_at_startup_uses_the_cached_copy(tmp_path, remote, caplog):

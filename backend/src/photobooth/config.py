@@ -121,6 +121,10 @@ def _check(key: str, value: object, expected: object, where: str) -> None:
     elif expected is float:
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise ValueError(f"{key} in {where} must be a number, not {value!r}")
+        try:
+            float(value)
+        except OverflowError:
+            raise ValueError(f"{key} in {where} is too large") from None
     elif isinstance(value, bool) or not isinstance(value, expected):
         raise ValueError(f"{key} in {where} must be of type {expected.__name__}, not {value!r}")
 
