@@ -4,17 +4,12 @@
   import { deleteCapture, newPhoto, type BoothState } from '../lib/booth'
 
   let { state }: { state: BoothState } = $props()
-
-  const media = $derived(`/media/${state.capture_id}`)
 </script>
 
 <div class="result">
   <Confetti opacity={0.5} />
   <div class="print">
-    <img src="{media}/photo.jpg" alt="" />
-    {#if state.boomerang_ready}
-      <video src="{media}/boomerang.mp4" autoplay loop muted playsinline></video>
-    {/if}
+    <img src="/media/{state.capture_id}/photo.jpg" alt="" />
   </div>
   <div class="side">
     <div class="scan"><Sticker tilt={-5} size={31} border={5} shadow={[6, 8]}>SCAN TO GET<br />YOUR PHOTO</Sticker></div>
@@ -41,15 +36,13 @@
     left: 4%;
     top: 13%;
     width: 58%;
-    display: grid;
     rotate: -2deg;
     border: 12px solid #fff;
     background: #000;
     box-shadow: 12px 16px 0 #0009;
   }
 
-  .print > * {
-    grid-area: 1 / 1;
+  .print img {
     display: block;
     width: 100%;
     aspect-ratio: 16 / 9;

@@ -49,7 +49,7 @@ All text is English. One look throughout: a black background with scattered gree
 
 **Countdown.** A tap starts a 3 s countdown. The mirrored live preview fills the screen, letterboxed. The green button travels from the centre to the bottom-right corner and shows 3, 2, 1 there, so faces stay clear. The countdown is drawn over the screen only and never appears in recorded media. At zero the screen flashes white and the photo is taken.
 
-**Result.** The photo in a white print frame, tilted about 2 degrees, on the left; the boomerang plays in that frame as soon as it exists, the still until then. On the right, the QR code under a "SCAN TO GET YOUR PHOTO" sticker, and below it two buttons: Delete (quiet, outlined) and New photo (green). No notice about where photos go.
+**Result.** The photo in a white print frame, tilted about 2 degrees, on the left; the frame shows the still photo only, and the boomerang and video are offered through the QR link. On the right, the QR code under a "SCAN TO GET YOUR PHOTO" sticker, and below it two buttons: Delete (quiet, outlined) and New photo (green). No notice about where photos go.
 Delete is available for 15 s after the shot, the owner's choice: the Photos Library API cannot delete an uploaded item, so a photo may only be uploaded once Delete is gone, and 15 s lets a guest who scans at once get the link filled within seconds rather than after the whole result screen.
 When the 15 s pass, the Delete button disappears and the capture becomes kept; the result screen stays until its timeout (placeholder 45 s) or New photo, then returns to idle.
 Delete removes the photo, boomerang and video and returns to idle. New photo makes the current capture kept at once and starts a new countdown.
