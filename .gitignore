@@ -7,3 +7,6 @@ __pycache__/
 .pytest_cache/
 .superpowers/
 backend/dist/
+worker/node_modules
+worker/.wrangler
+worker/worker-configuration.d.ts

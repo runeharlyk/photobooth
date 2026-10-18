@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "photobooth-share",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "photo.runeharlyk.dk", "custom_domain": true }],
+  "r2_buckets": [{ "binding": "SHARES", "bucket_name": "photobooth-shares" }],
+  "secrets": { "required": ["UPLOAD_TOKEN"] }
+}
