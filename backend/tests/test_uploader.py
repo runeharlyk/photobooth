@@ -586,3 +586,18 @@ async def test_a_large_photo_on_a_slow_uplink_is_sent_in_blocks_each_within_the_
 
     assert worker.uploads[0].body == photo
     assert at_or_above(caplog, logging.WARNING) == []
+
+
+@pytest.mark.parametrize("token", [f"{TOKEN}”", f"{TOKEN}\n"], ids=["typographic-quote", "newline"])
+async def test_a_request_that_cannot_be_built_is_logged_by_type_only(store, worker, start_uploader, caplog, token):
+    kept(store)
+
+    with caplog.at_level(logging.DEBUG):
+        start_uploader(worker.url, token=token)
+        await until(lambda: at_or_above(caplog, logging.WARNING))
+        await asyncio.sleep(0.1)
+
+    assert worker.attempts == []
+    [warning] = at_or_above(caplog, logging.WARNING)
+    assert "Error" in warning
+    assert TOKEN not in caplog.text

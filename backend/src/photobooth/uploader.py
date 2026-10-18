@@ -1,5 +1,4 @@
 import asyncio
-import http.client
 import io
 import json
 import logging
@@ -164,24 +163,24 @@ class Uploader:
     def _put(self, capture_id: str, name: str, body: BinaryIO) -> int:
         """Sends the body as a stream: http.client then writes it block by block, each block with
         its own timeout, where a bytes body is one write whose timeout bounds the whole upload."""
-        request = urllib.request.Request(
-            f"{self._config.url}/api/captures/{capture_id}/{name}",
-            data=body,
-            method="PUT",
-            headers={
-                "Authorization": f"Bearer {self._config.token}",
-                "Content-Type": CONTENT_TYPES[name],
-                "Content-Length": str(_size(body)),
-                "User-Agent": USER_AGENT,
-            },
-        )
         try:
+            request = urllib.request.Request(
+                f"{self._config.url}/api/captures/{capture_id}/{name}",
+                data=body,
+                method="PUT",
+                headers={
+                    "Authorization": f"Bearer {self._config.token}",
+                    "Content-Type": CONTENT_TYPES[name],
+                    "Content-Length": str(_size(body)),
+                    "User-Agent": USER_AGENT,
+                },
+            )
             with urllib.request.urlopen(request, timeout=self._timeout_s) as response:
                 return response.status
         except urllib.error.HTTPError as error:
             error.close()
             return error.code
-        except (OSError, http.client.HTTPException) as error:
+        except Exception as error:  # the message may quote the request, its token included
             raise _Unavailable(describe_failure(error)) from None
 
     @staticmethod

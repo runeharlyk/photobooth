@@ -283,3 +283,34 @@ def test_the_remote_document_cannot_set_the_upload_table(local):
 
     assert ignored_remote_keys(document) == ["upload"]
     assert with_remote(local, document).upload == local.upload
+
+
+@pytest.mark.parametrize("token", ["abcXYZ019", "a.b_c~d+e/f-g", "dG9rZW4=", "dG9rZW4==", "-"])
+def test_an_upload_token_in_the_bearer_charset_is_accepted(tmp_path, token):
+    body = MINIMAL + f'\n[upload]\nurl = "https://photo.runeharlyk.dk"\ntoken = "{token}"\n'
+
+    assert load_config(write_config(tmp_path / "config.toml", body)).upload.token == token
+
+
+@pytest.mark.parametrize(
+    "literal",
+    [
+        f'"{TOKEN}\\n"',
+        f'"{TOKEN} "',
+        f'" {TOKEN}"',
+        f'"{TOKEN}”"',
+        f'"“{TOKEN}"',
+        f'"{TOKEN}æ"',
+        f'"{TOKEN}\t"',
+        f'"=={TOKEN}"',
+        f'"{TOKEN}=x"',
+        f'"{TOKEN};"',
+    ],
+)
+def test_an_upload_token_outside_the_bearer_charset_is_rejected_without_quoting_it(tmp_path, literal):
+    body = MINIMAL + f'\n[upload]\nurl = "https://photo.runeharlyk.dk"\ntoken = {literal}\n'
+
+    with pytest.raises(ValueError, match="token") as raised:
+        load_config(write_config(tmp_path / "config.toml", body))
+
+    assert TOKEN not in str(raised.value)

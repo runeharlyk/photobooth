@@ -12,6 +12,7 @@ DEFAULT_EVENT = "kitchen"
 REMOTE_KEYS = {"share_base_url", "event", "timings"}
 _EVENT_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 _UPLOAD_KEYS = ("url", "token")
+_BEARER_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._~+/-]+=*")
 _PLAIN_HTTP_HOSTS = ("127.0.0.1", "localhost")
 TOP_LEVEL_TYPES = {
     "share_base_url": str,
@@ -131,8 +132,11 @@ def _upload(table: object) -> UploadConfig:
             f"url in [upload] must be an https:// origin (http:// only for 127.0.0.1 or localhost) "
             f"with no path, query or credentials, not {shown}"
         )
-    if not isinstance(token, str) or not token:
-        raise ValueError("token in [upload] must be a non-empty string")
+    if not isinstance(token, str) or not _BEARER_TOKEN_PATTERN.fullmatch(token):
+        raise ValueError(
+            "token in [upload] must be a bearer token (RFC 6750): letters, digits and . _ ~ + / -, "
+            "optionally ending in ="
+        )
     return UploadConfig(url.rstrip("/"), token)
 
 
