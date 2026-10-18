@@ -3,11 +3,14 @@ import { handleUpload } from './upload'
 
 export default {
   async fetch(request, env): Promise<Response> {
-    const segments = new URL(request.url).pathname.split('/').slice(1)
-    if (request.method === 'PUT' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'captures') {
-      return handleUpload(request, env, segments[2], segments[3])
+    const [root, ...rest] = new URL(request.url).pathname.split('/').slice(1)
+    if (root === 'api') {
+      const [collection, id, name, ...extra] = rest
+      if (request.method === 'PUT' && collection === 'captures' && id !== undefined && name !== undefined && extra.length === 0) {
+        return handleUpload(request, env, id, name)
+      }
     }
-    if (segments[0] === 'p') return (await handleGuest(request, env.SHARES, segments.slice(1))) ?? notFound()
+    if (root === 'p') return (await handleGuest(request, env.SHARES, rest)) ?? notFound()
     return notFound()
   },
 } satisfies ExportedHandler<Env>

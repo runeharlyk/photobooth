@@ -1,7 +1,8 @@
 import { CONTENT_TYPES, isId, isName, markerKey, mediaKey, type Name } from './capture'
 
-const EVENT = /^[a-z0-9][a-z0-9-]{0,39}$/
-const UTC_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|\+00:00)$/
+const BEARER = /^Bearer (.+)$/i
+const EVENT =/^[a-z0-9][a-z0-9-]{0,39}$/
+const UTC_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|\+00:00)$/
 
 export async function handleUpload(request: Request, env: Env, id: string, name: string): Promise<Response> {
   if (!(await isAuthorized(request.headers.get('authorization'), env.UPLOAD_TOKEN))) {
@@ -20,8 +21,9 @@ export async function handleUpload(request: Request, env: Env, id: string, name:
 }
 
 async function isAuthorized(header: string | null, secret: string | undefined): Promise<boolean> {
-  if (!secret || !header?.startsWith('Bearer ')) return false
-  const [given, expected] = await Promise.all([digest(header.slice('Bearer '.length)), digest(secret)])
+  const token = BEARER.exec(header ?? '')?.[1]
+  if (!secret || token === undefined) return false
+  const [given, expected] = await Promise.all([digest(token), digest(secret)])
   return crypto.subtle.timingSafeEqual(given, expected)
 }
 
@@ -30,7 +32,8 @@ async function digest(value: string): Promise<ArrayBuffer> {
 }
 
 function mediaType(header: string | null): string {
-  return (header ?? '').split(';')[0].trim().toLowerCase()
+  const [type = ''] = (header ?? '').split(';')
+  return type.trim().toLowerCase()
 }
 
 function badRequest(message: string): Response {
@@ -55,18 +58,10 @@ function isValidMeta(body: ArrayBuffer): boolean {
 }
 
 function isUtcTimestamp(value: string): boolean {
-  const match = UTC_TIMESTAMP.exec(value)
-  if (!match) return false
-  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number)
-  const date = new Date(Date.UTC(year, month - 1, day, hour, minute, second))
-  return (
-    date.getUTCFullYear() === year &&
-    date.getUTCMonth() === month - 1 &&
-    date.getUTCDate() === day &&
-    date.getUTCHours() === hour &&
-    date.getUTCMinutes() === minute &&
-    date.getUTCSeconds() === second
-  )
+  if (!UTC_TIMESTAMP.test(value)) return false
+  const wholeSeconds = value.slice(0, 19)
+  const parsed = Date.parse(`${wholeSeconds}Z`)
+  return !Number.isNaN(parsed) && new Date(parsed).toISOString().startsWith(wholeSeconds)
 }
 
 async function store(bucket: R2Bucket, id: string, name: Name, body: ArrayBuffer): Promise<void> {

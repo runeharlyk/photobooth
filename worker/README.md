@@ -9,12 +9,14 @@ The interface it implements is fixed in the "Sharing" and "Media and the QR link
 | `PUT /api/captures/{id}/{name}` | Booth upload of `photo.jpg`, `boomerang.mp4`, `video.mp4` or `meta.json`, with `Authorization: Bearer <UPLOAD_TOKEN>`; 204 on success, 401 without the right token, 400 for a bad id, name, content type, empty body or invalid `meta.json`. |
 | `GET /p/{id}` | Guest page: waiting, ready (photo and downloads) or expired. |
 | `GET /p/{id}/status` | `{"photo", "boomerang", "video", "expired"}` as JSON, never cached. |
-| `GET /p/{id}/{photo.jpg,boomerang.mp4,video.mp4}` | The file; `?download=1` serves it as an attachment. |
+| `GET /p/{id}/{photo.jpg,boomerang.mp4,video.mp4}` | The file; `?download=1` serves it as an attachment named `photobooth-{first 8 id characters}-{name}`. |
 
 Everything else is a 404; `meta.json` is never served and nothing lists captures.
+Guest routes only read single objects (`head` and `get`, R2 Class B operations), so anonymous traffic never causes a list or a write.
+The page's Photo button links to the same URL as the shown image with a `download` attribute, so the browser can reuse the image it already fetched; the boomerang and video use `?download=1`.
 
 Storage: `media/{id}/{name}` for the files, and `markers/{id}` written once on an id's first upload.
-A marker whose media are gone means the capture has expired.
+A marker without a photo means the capture has expired, since the booth always uploads the photo first.
 
 ## Test
 
@@ -38,6 +40,25 @@ curl -X PUT -H "Authorization: Bearer dev-token" -H "Content-Type: image/jpeg" \
 ## Deploy
 
 Deployment needs the owner's Cloudflare account, on which the zone `runeharlyk.dk` already lives.
+
+### Check the zone's Worker routes first
+
+The zone already runs other Workers on dashboard-configured routes.
+Cloudflare's routing docs state that routes "take precedence if configured on the same hostname" over a Custom Domain, so a route whose pattern matches `photo.runeharlyk.dk` - such as `*runeharlyk.dk/*` or `*.runeharlyk.dk/*` - would run another Worker in front of this one and receive the booth's `Authorization` header.
+Before the first deploy, and whenever routes change, list every route on the zone and confirm that none matches `photo.runeharlyk.dk`.
+Wrangler 4.147.0 has no command for this, so use the API (an API token with the `Workers Routes Read` permission, and the zone ID from the zone's Overview page in the dashboard):
+
+```sh
+curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+  "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/workers/routes"
+```
+
+Each entry's `pattern` must not match `photo.runeharlyk.dk`; a leading `*` matches any subdomain.
+In the dashboard, the routes are listed per Worker under Workers & Pages > the Worker > Settings > Domains & Routes, so every Worker on the account must be checked there.
+If a matching route exists, narrow its pattern to the hostnames it serves before deploying.
+
+### Deploy
+
 Run these from `worker/`:
 
 ```sh
@@ -55,3 +76,29 @@ pnpm exec wrangler deploy
 - The 30-day rule is what makes photos expire, and the 365-day rule keeps the marker long enough for the page to say "These photos have expired." rather than wait forever; a rule counts from each object's upload, so a re-uploaded file starts again.
 - `secret put` prompts for the value; use the same token as `[upload] token` in the booth's local `config.toml`, for example from `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
 - `wrangler deploy` attaches the custom domain `photo.runeharlyk.dk` declared in `wrangler.jsonc` and Cloudflare creates its DNS record and certificate; a Custom Domain cannot be created on a hostname that already has a CNAME record, so delete any such record for `photo` first. The `workers.dev` and preview URLs are disabled.
+
+### Check after deploying
+
+Confirm that the marker is written once and never overwritten, with a throwaway id and any small JPEG:
+
+```sh
+ID=deploy-check-000000000
+curl -X PUT -H "Authorization: Bearer $UPLOAD_TOKEN" -H "Content-Type: image/jpeg" \
+  --data-binary @photo.jpg "https://photo.runeharlyk.dk/api/captures/$ID/photo.jpg"
+pnpm exec wrangler r2 object get "photobooth-shares/markers/$ID" --remote --pipe
+curl -X PUT -H "Authorization: Bearer $UPLOAD_TOKEN" -H "Content-Type: image/jpeg" \
+  --data-binary @photo.jpg "https://photo.runeharlyk.dk/api/captures/$ID/photo.jpg"
+pnpm exec wrangler r2 object get "photobooth-shares/markers/$ID" --remote --pipe
+pnpm exec wrangler r2 object delete "photobooth-shares/media/$ID/photo.jpg" --remote
+pnpm exec wrangler r2 object delete "photobooth-shares/markers/$ID" --remote
+```
+
+Both uploads must answer 204 and both reads must print the same `uploaded_at`.
+A second, later timestamp means the production bucket ignored the create-only condition, and the marker would then be rewritten on every upload.
+
+### Optional: rate-limit the guest routes
+
+A rate limiting rule caps how much of the free Workers and R2 quota one client can use.
+On the Free plan Cloudflare allows one such rule, counted per IP over 10 s, with a 10 s mitigation and the request path as the only useful field.
+Create it under Security rules > Create rule > Rate limiting rules, matching requests whose URI path starts with `/p/`, and blocking for 10 s above a threshold.
+Guests at an event often share one public IP on the venue's Wi-Fi, and each open page polls about three times per 10 s, so keep the threshold generous, for example 150 requests per 10 s.

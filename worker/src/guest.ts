@@ -1,4 +1,4 @@
-import { CONTENT_TYPES, isId, markerKey, mediaKey, mediaPrefix } from './capture'
+import { CONTENT_TYPES, downloadName, isId, markerKey, mediaKey } from './capture'
 import { renderPage } from './page'
 
 export const PUBLIC_FILES = ['photo.jpg', 'boomerang.mp4', 'video.mp4'] as const
@@ -13,8 +13,8 @@ export interface Status {
 }
 
 export async function handleGuest(request: Request, bucket: R2Bucket, segments: string[]): Promise<Response | null> {
-  const [id, child] = segments
-  if (request.method !== 'GET' || !isId(id) || segments.length > 2) return null
+  const [id, child, ...rest] = segments
+  if (request.method !== 'GET' || id === undefined || !isId(id) || rest.length > 0) return null
   if (child === undefined) return page(bucket, id)
   if (child === 'status') return status(bucket, id)
   if (isPublicFile(child)) return file(bucket, id, child, new URL(request.url).searchParams.get('download') === '1')
@@ -26,15 +26,13 @@ function isPublicFile(value: string): value is PublicFile {
 }
 
 async function readStatus(bucket: R2Bucket, id: string): Promise<Status> {
-  const listing = await bucket.list({ prefix: mediaPrefix(id) })
-  const stored = new Set(listing.objects.map((object) => object.key.slice(mediaPrefix(id).length)))
-  const expired = stored.size === 0 && (await bucket.head(markerKey(id))) !== null
-  return {
-    photo: stored.has('photo.jpg'),
-    boomerang: stored.has('boomerang.mp4'),
-    video: stored.has('video.mp4'),
-    expired,
-  }
+  const exists = async (key: string) => (await bucket.head(key)) !== null
+  const [photo, boomerang, video] = await Promise.all([
+    exists(mediaKey(id, 'photo.jpg')),
+    exists(mediaKey(id, 'boomerang.mp4')),
+    exists(mediaKey(id, 'video.mp4')),
+  ])
+  return { photo, boomerang, video, expired: !photo && (await exists(markerKey(id))) }
 }
 
 async function status(bucket: R2Bucket, id: string): Promise<Response> {
@@ -74,7 +72,7 @@ async function file(bucket: R2Bucket, id: string, name: PublicFile, download: bo
     'x-content-type-options': 'nosniff',
   })
   if (download) {
-    headers.set('content-disposition', `attachment; filename="photobooth-${id.slice(0, 8)}-${name}"`)
+    headers.set('content-disposition', `attachment; filename="${downloadName(id, name)}"`)
   }
   return new Response(object.body, { headers })
 }

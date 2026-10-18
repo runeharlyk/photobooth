@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { CONTENT_TYPES, get, newId, upload, validMeta, type Name } from './helpers'
+import { CONTENT_TYPES, get, newId, TOKEN, upload, validMeta, type Name } from './helpers'
 
 async function storedKeys(id: string): Promise<string[]> {
   const media = await env.SHARES.list({ prefix: `media/${id}/` })
@@ -46,6 +46,12 @@ describe('upload authentication', () => {
     const object = await env.SHARES.get(`media/${id}/photo.jpg`)
     expect(await object?.text()).toBe('jpeg-bytes')
     expect(object?.httpMetadata?.contentType).toBe('image/jpeg')
+  })
+
+  it.each(['bearer', 'BEARER', 'BeArEr'])('accepts the %s scheme in any case', async (scheme) => {
+    const id = newId()
+    const response = await upload(id, 'photo.jpg', 'jpeg-bytes', { authorization: `${scheme} ${TOKEN}` })
+    expect(response.status).toBe(204)
   })
 
   it('compares the token in constant time', async () => {

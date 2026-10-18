@@ -1,3 +1,4 @@
+import { downloadName } from './capture'
 import type { PublicFile, Status } from './guest'
 
 const DOWNLOADS: { name: PublicFile; key: 'photo' | 'boomerang' | 'video'; label: string }[] = [
@@ -66,7 +67,6 @@ section { display: flex; flex-direction: column; align-items: center; gap: 36px;
 const SCRIPT = `
 (() => {
   const main = document.querySelector('main')
-  const base = main.dataset.base
   const deadline = Date.now() + 10 * 60 * 1000
   const show = (name) => {
     for (const section of main.querySelectorAll('section')) section.hidden = section.id !== name
@@ -79,10 +79,10 @@ const SCRIPT = `
     if (!status.photo) return false
     show('ready')
     const photo = main.querySelector('#ready img')
-    if (!photo.hasAttribute('src')) photo.src = base + 'photo.jpg'
-    for (const link of main.querySelectorAll('a[data-name]')) {
+    if (!photo.hasAttribute('src')) photo.src = main.querySelector('a[data-key="photo"]').dataset.href
+    for (const link of main.querySelectorAll('a[data-key]')) {
       if (status[link.dataset.key] && !link.hasAttribute('href')) {
-        link.href = base + link.dataset.name + '?download=1'
+        link.href = link.dataset.href
         link.removeAttribute('aria-disabled')
       }
     }
@@ -108,10 +108,13 @@ const SCRIPT = `
 export function renderPage(id: string, status: Status, nonce: string): string {
   const visible = status.expired ? 'expired' : status.photo ? 'ready' : 'waiting'
   const hidden = (section: string) => (section === visible ? '' : ' hidden')
-  const photoSource = status.photo ? ` src="/p/${id}/photo.jpg"` : ''
+  const photoUrl = `/p/${id}/photo.jpg`
+  const photoSource = status.photo ? ` src="${photoUrl}"` : ''
   const downloads = DOWNLOADS.map(({ name, key, label }) => {
-    const state = status[key] ? `href="/p/${id}/${name}?download=1"` : 'aria-disabled="true"'
-    return `<a class="button" data-name="${name}" data-key="${key}" ${state}>${label}</a>`
+    const href = name === 'photo.jpg' ? photoUrl : `/p/${id}/${name}?download=1`
+    const saveAs = name === 'photo.jpg' ? ` download="${downloadName(id, name)}"` : ''
+    const state = status[key] ? ` href="${href}"` : ' aria-disabled="true"'
+    return `<a class="button" data-name="${name}" data-key="${key}" data-href="${href}"${saveAs}${state}>${label}</a>`
   }).join('\n      ')
 
   return `<!doctype html>
@@ -127,7 +130,7 @@ export function renderPage(id: string, status: Status, nonce: string): string {
 </head>
 <body>
   <div class="confetti" aria-hidden="true">${'<span></span>'.repeat(CONFETTI.length)}</div>
-  <main data-base="/p/${id}/" data-poll="/p/${id}/status" data-status="${escapeAttribute(JSON.stringify(status))}">
+  <main data-poll="/p/${id}/status" data-status="${escapeAttribute(JSON.stringify(status))}">
     <section id="waiting"${hidden('waiting')}>
       <div class="circle busy"><p class="sticker">Getting your photos ready...</p></div>
     </section>

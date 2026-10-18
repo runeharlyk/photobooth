@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers'
 import { describe, expect, it } from 'vitest'
-import { get, newId, upload, validMeta } from './helpers'
+import worker from '../src'
+import { get, newId, ORIGIN, TOKEN, upload, validMeta } from './helpers'
 
 async function seed(id: string, names: string[]): Promise<void> {
   for (const name of names) {
@@ -25,7 +26,7 @@ async function status(id: string): Promise<unknown> {
 function section(html: string, name: string): { visible: boolean; content: string } {
   const match = new RegExp(`<section id="${name}"([^>]*)>([\\s\\S]*?)</section>`).exec(html)
   expect(match, `section ${name}`).not.toBeNull()
-  return { visible: !/\bhidden\b/.test(match![1]), content: match![2] }
+  return { visible: !/\bhidden\b/.test(match?.[1] ?? ''), content: match?.[2] ?? '' }
 }
 
 function visibleSections(html: string): string[] {
@@ -67,10 +68,85 @@ describe('status', () => {
     expect(await status(id)).toEqual({ photo: false, boomerang: false, video: false, expired: true })
   })
 
-  it('does not report expired while meta.json is still stored', async () => {
+  it('reports expired once the photo has expired even while the videos remain', async () => {
     const id = newId()
-    await seed(id, ['meta.json'])
-    expect(await status(id)).toEqual({ photo: false, boomerang: false, video: false, expired: false })
+    await seed(id, ['photo.jpg', 'meta.json', 'boomerang.mp4', 'video.mp4'])
+    await env.SHARES.delete([`media/${id}/photo.jpg`, `media/${id}/meta.json`])
+    expect(await status(id)).toEqual({ photo: false, boomerang: true, video: true, expired: true })
+    expect(visibleSections((await page(id)).html)).toEqual(['expired'])
+  })
+
+  it('reports expired for a marker alone', async () => {
+    const id = newId()
+    await env.SHARES.put(`markers/${id}`, JSON.stringify({ uploaded_at: '2026-01-01T00:00:00.000Z' }))
+    expect(await status(id)).toEqual({ photo: false, boomerang: false, video: false, expired: true })
+  })
+
+  it('is not expired while the photo exists, whatever else is missing', async () => {
+    const id = newId()
+    await seed(id, ['photo.jpg', 'video.mp4'])
+    await env.SHARES.delete(`markers/${id}`)
+    expect(await status(id)).toEqual({ photo: true, boomerang: false, video: true, expired: false })
+  })
+})
+
+describe('guest storage operations', () => {
+  function recordingEnv(calls: string[]): Env {
+    const shares = new Proxy(env.SHARES, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target)
+        if (typeof value !== 'function') return value
+        return (...args: unknown[]) => {
+          calls.push(String(property))
+          return value.apply(target, args)
+        }
+      },
+    })
+    return { ...env, SHARES: shares }
+  }
+
+  async function operations(path: string): Promise<string[]> {
+    const calls: string[] = []
+    const request = new Request<unknown, IncomingRequestCfProperties>(`${ORIGIN}${path}`)
+    const response = await worker.fetch(request, recordingEnv(calls))
+    await response.arrayBuffer()
+    return calls
+  }
+
+  const states: [string, string[], boolean][] = [
+    ['waiting', [], false],
+    ['ready with the photo only', ['photo.jpg', 'meta.json'], false],
+    ['complete', ['photo.jpg', 'meta.json', 'boomerang.mp4', 'video.mp4'], false],
+    ['expired', ['photo.jpg', 'meta.json'], true],
+  ]
+
+  it.each(states)('uses only object reads for a %s capture', async (_state, names, expired) => {
+    const id = newId()
+    await seed(id, names)
+    if (expired) await expire(id)
+    const paths = [
+      `/p/${id}`,
+      `/p/${id}/status`,
+      `/p/${id}/photo.jpg`,
+      `/p/${id}/photo.jpg?download=1`,
+      `/p/${id}/boomerang.mp4?download=1`,
+      `/p/${id}/video.mp4`,
+      `/p/${id}/meta.json`,
+      `/p/${id}/unknown`,
+      `/p/not-an-id/status`,
+    ]
+    for (const path of paths) {
+      const calls = await operations(path)
+      expect(calls.filter((call) => call !== 'head' && call !== 'get'), path).toEqual([])
+    }
+  })
+
+  it('heads the marker only while the photo is absent', async () => {
+    const waiting = newId()
+    expect(await operations(`/p/${waiting}/status`)).toEqual(['head', 'head', 'head', 'head'])
+    const ready = newId()
+    await seed(ready, ['photo.jpg'])
+    expect(await operations(`/p/${ready}/status`)).toEqual(['head', 'head', 'head'])
   })
 })
 
@@ -86,6 +162,8 @@ describe('file download', () => {
     expect(response.status).toBe(200)
     expect(response.headers.get('content-type')).toBe(contentType)
     expect(response.headers.get('content-disposition')).toBeNull()
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(response.headers.get('cache-control')).toBe('private, max-age=3600')
     expect(new TextDecoder().decode(await response.arrayBuffer())).toBe(`${name}-bytes`)
   })
 
@@ -101,6 +179,8 @@ describe('file download', () => {
     expect(response.headers.get('content-disposition')).toBe(
       `attachment; filename="photobooth-${id.slice(0, 8)}-${suffix}"`,
     )
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(response.headers.get('cache-control')).toBe('private, max-age=3600')
     expect(new TextDecoder().decode(await response.arrayBuffer())).toBe(`${name}-bytes`)
   })
 
@@ -142,10 +222,11 @@ describe('guest page', () => {
     const { html } = await page(id)
     expect(visibleSections(html)).toEqual(['ready'])
     expect(section(html, 'ready').content).toContain(`src="/p/${id}/photo.jpg"`)
-    expect(downloadLink(html, 'photo.jpg')).toContain(`href="/p/${id}/photo.jpg?download=1"`)
+    expect(downloadLink(html, 'photo.jpg')).toContain(`href="/p/${id}/photo.jpg"`)
+    expect(downloadLink(html, 'photo.jpg')).toContain(`download="photobooth-${id.slice(0, 8)}-photo.jpg"`)
     for (const name of ['boomerang.mp4', 'video.mp4']) {
       expect(downloadLink(html, name)).toContain('aria-disabled="true"')
-      expect(downloadLink(html, name)).not.toContain('href=')
+      expect(downloadLink(html, name)).not.toMatch(/\shref=/)
     }
     expect(html).toContain(`/p/${id}/status`)
   })
@@ -155,8 +236,11 @@ describe('guest page', () => {
     await seed(id, ['photo.jpg', 'meta.json', 'boomerang.mp4', 'video.mp4'])
     const { html } = await page(id)
     expect(visibleSections(html)).toEqual(['ready'])
-    for (const name of ['photo.jpg', 'boomerang.mp4', 'video.mp4']) {
+    expect(downloadLink(html, 'photo.jpg')).toContain(`href="/p/${id}/photo.jpg"`)
+    for (const name of ['boomerang.mp4', 'video.mp4']) {
       expect(downloadLink(html, name)).toContain(`href="/p/${id}/${name}?download=1"`)
+    }
+    for (const name of ['photo.jpg', 'boomerang.mp4', 'video.mp4']) {
       expect(downloadLink(html, name)).not.toContain('aria-disabled')
     }
   })
@@ -181,7 +265,9 @@ describe('guest page', () => {
     expect(policy).toContain("default-src 'none'")
     expect(policy).toContain("connect-src 'self'")
     expect(policy).toContain("img-src 'self'")
+    expect(policy).toContain("frame-ancestors 'none'")
     expect(response.headers.get('referrer-policy')).toBe('no-referrer')
+    expect(response.headers.get('x-robots-tag')).toBe('noindex')
   })
 
   it('runs only the scripts and styles it was rendered with', async () => {
@@ -233,7 +319,7 @@ describe('unknown routes', () => {
     await seed(id, ['photo.jpg'])
     await get(`/api/captures/${id}/photo.jpg`, {
       method: 'DELETE',
-      headers: { authorization: 'Bearer test-upload-token' },
+      headers: { authorization: `Bearer ${TOKEN}` },
     })
     expect(await env.SHARES.head(`media/${id}/photo.jpg`)).not.toBeNull()
   })
