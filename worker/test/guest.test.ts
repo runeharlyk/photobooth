@@ -90,16 +90,16 @@ describe('file download', () => {
   })
 
   it.each([
-    ['photo.jpg', 'jpg'],
-    ['boomerang.mp4', 'mp4'],
-    ['video.mp4', 'mp4'],
-  ])('serves %s as an attachment with ?download=1', async (name, extension) => {
+    ['photo.jpg', 'photo.jpg'],
+    ['boomerang.mp4', 'boomerang.mp4'],
+    ['video.mp4', 'video.mp4'],
+  ])('serves %s as an attachment named by kind with ?download=1', async (name, suffix) => {
     const id = newId()
     await seed(id, [name])
     const response = await get(`/p/${id}/${name}?download=1`)
     expect(response.status).toBe(200)
     expect(response.headers.get('content-disposition')).toBe(
-      `attachment; filename="photobooth-${id.slice(0, 8)}.${extension}"`,
+      `attachment; filename="photobooth-${id.slice(0, 8)}-${suffix}"`,
     )
     expect(new TextDecoder().decode(await response.arrayBuffer())).toBe(`${name}-bytes`)
   })

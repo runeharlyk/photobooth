@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { CONTENT_TYPES, newId, upload, validMeta, type Name } from './helpers'
+import { CONTENT_TYPES, get, newId, upload, validMeta, type Name } from './helpers'
 
 async function storedKeys(id: string): Promise<string[]> {
   const media = await env.SHARES.list({ prefix: `media/${id}/` })
@@ -189,6 +189,23 @@ describe('meta.json validation', () => {
     expect(await (await env.SHARES.get(`media/${id}/meta.json`))?.text()).toBe(body)
   })
 
+  it('accepts unknown extra keys, stores them unchanged and never serves them', async () => {
+    const id = newId()
+    const body = JSON.stringify({
+      captured_at: '2026-10-18T19:30:00+00:00',
+      event: 'kitchen',
+      album: 'secret-album-name',
+      faces: [1, 2],
+    })
+    expect((await upload(id, 'meta.json', body)).status).toBe(204)
+    expect(await (await env.SHARES.get(`media/${id}/meta.json`))?.text()).toBe(body)
+    for (const path of [`/p/${id}/meta.json`, `/p/${id}/meta.json?download=1`, `/p/${id}`, `/p/${id}/status`]) {
+      const response = await get(path)
+      expect(await response.text()).not.toContain('secret-album-name')
+    }
+    expect((await get(`/p/${id}/meta.json`)).status).toBe(404)
+  })
+
   it.each([
     ['the booth format', meta('2026-10-18T19:30:00+00:00', 'kitchen')],
     ['a hyphenated event', meta('2026-10-18T19:30:00+00:00', 'annas-30th')],
@@ -206,7 +223,7 @@ describe('meta.json validation', () => {
     ['JSON null', 'null'],
     ['a missing event', JSON.stringify({ captured_at: '2026-10-18T19:30:00+00:00' })],
     ['a missing capture time', JSON.stringify({ event: 'kitchen' })],
-    ['an extra field', JSON.stringify({ captured_at: '2026-10-18T19:30:00Z', event: 'kitchen', id: 'x' })],
+    ['an extra field beside an invalid event', JSON.stringify({ captured_at: '2026-10-18T19:30:00Z', event: 'Kitchen', id: 'x' })],
     ['an uppercase event', meta('2026-10-18T19:30:00Z', 'Kitchen')],
     ['a hyphen-first event', meta('2026-10-18T19:30:00Z', '-party')],
     ['an empty event', meta('2026-10-18T19:30:00Z', '')],

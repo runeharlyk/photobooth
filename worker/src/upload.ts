@@ -46,11 +46,7 @@ function isValidMeta(body: ArrayBuffer): boolean {
   }
   if (typeof meta !== 'object' || meta === null || Array.isArray(meta)) return false
   const fields = meta as Record<string, unknown>
-  const keys = Object.keys(fields).sort()
   return (
-    keys.length === 2 &&
-    keys[0] === 'captured_at' &&
-    keys[1] === 'event' &&
     typeof fields.event === 'string' &&
     EVENT.test(fields.event) &&
     typeof fields.captured_at === 'string' &&

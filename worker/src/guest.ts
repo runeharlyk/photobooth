@@ -74,7 +74,7 @@ async function file(bucket: R2Bucket, id: string, name: PublicFile, download: bo
     'x-content-type-options': 'nosniff',
   })
   if (download) {
-    headers.set('content-disposition', `attachment; filename="photobooth-${id.slice(0, 8)}.${name.split('.')[1]}"`)
+    headers.set('content-disposition', `attachment; filename="photobooth-${id.slice(0, 8)}-${name}"`)
   }
   return new Response(object.body, { headers })
 }
