@@ -21,6 +21,10 @@ export function mediaKey(id: string, name: Name): string {
   return `media/${id}/${name}`
 }
 
+export function mediaPrefix(id: string): string {
+  return `media/${id}/`
+}
+
 export function markerKey(id: string): string {
   return `markers/${id}`
 }

@@ -36,6 +36,10 @@ export function upload(
   return exports.default.fetch(`${ORIGIN}/api/captures/${id}/${name}`, { method: 'PUT', headers, body })
 }
 
+export function get(path: string, init?: RequestInit): Promise<Response> {
+  return exports.default.fetch(`${ORIGIN}${path}`, init)
+}
+
 export function validMeta(): string {
   return JSON.stringify({ captured_at: '2026-10-18T19:30:00+00:00', event: 'kitchen' })
 }
