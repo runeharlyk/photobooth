@@ -6,7 +6,7 @@ import uvicorn
 
 from photobooth.api import create_app
 from photobooth.camera import make_camera
-from photobooth.config import load_config
+from photobooth.reloader import ConfigReloader
 from photobooth.session import Booth
 from photobooth.store import CaptureStore
 
@@ -19,15 +19,16 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
     parser = argparse.ArgumentParser(prog="photobooth", description="Run the photobooth server.")
     parser.add_argument("--config", type=Path, required=True, help="path to the TOML configuration")
-    config = load_config(parser.parse_args().config)
+    reloader = ConfigReloader(parser.parse_args().config)
+    config = reloader.config
 
     store = CaptureStore(config.media_dir)
     store.recover()
     store.prune_clips()
     camera = make_camera(config.camera)
-    booth = Booth(camera, store, config.timings)
+    booth = Booth(camera, store, reloader.settings)
     frontend_dir = WEB_DIR if WEB_DIR.is_dir() else None
-    app = create_app(booth, camera, store, config.share_base_url, frontend_dir)
+    app = create_app(booth, camera, store, reloader, frontend_dir)
     uvicorn.run(app, host=config.host, port=config.port, timeout_graceful_shutdown=SHUTDOWN_GRACE_S)
 
 

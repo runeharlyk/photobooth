@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from photobooth.camera import Camera, CameraError
+from photobooth.reloader import ConfigReloader
 from photobooth.session import Booth, BoothState, Screen
 from photobooth.sharing import qr_svg, share_url
 from photobooth.store import PUBLIC_FILES, CaptureStore
@@ -33,15 +34,20 @@ def create_app(
     booth: Booth,
     camera: Camera,
     store: CaptureStore,
-    share_base_url: str,
+    reloader: ConfigReloader,
     frontend_dir: Path | None,
 ) -> FastAPI:
+    settings = reloader.settings
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await booth.start()
+        reloading = asyncio.create_task(reloader.run())
         try:
             yield
         finally:
+            reloading.cancel()
+            await asyncio.wait({reloading})
             try:
                 await booth.close()
             finally:
@@ -53,7 +59,7 @@ def create_app(
 
     def event_data(state: BoothState) -> str:
         payload = asdict(state)
-        payload["share_url"] = share_url(share_base_url, state.capture_id) if state.capture_id else None
+        payload["share_url"] = share_url(settings.share_base_url, state.capture_id) if state.capture_id else None
         return f"data: {json.dumps(payload)}\n\n"
 
     async def events() -> AsyncIterator[str]:
@@ -114,7 +120,7 @@ def create_app(
             known = False
         if not known:
             raise HTTPException(status_code=404)
-        return Response(qr_svg(share_url(share_base_url, capture_id)), media_type="image/svg+xml")
+        return Response(qr_svg(share_url(settings.share_base_url, capture_id)), media_type="image/svg+xml")
 
     @app.get("/media/{capture_id}/{name}")
     async def media(capture_id: str, name: str) -> FileResponse:

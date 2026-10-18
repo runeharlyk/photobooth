@@ -11,6 +11,7 @@ import pytest
 from photobooth import session
 from photobooth.camera import CameraError
 from photobooth.camera.fake import FakeCamera
+from photobooth.config import LiveSettings
 from photobooth.session import FAILURE_MESSAGE, Booth, BoothState, Screen
 from photobooth.store import BOOMERANG, CLIP, META, PHOTO, VIDEO, CaptureState, CaptureStore
 
@@ -574,7 +575,7 @@ async def test_unusable_media_root_degrades_to_a_fault(tmp_path, camera, fast_ti
 
     store = CaptureStore(blocker / "media")
     store.recover()
-    booth = Booth(camera, store, fast_timings)
+    booth = Booth(camera, store, LiveSettings(fast_timings, "https://photo.example.invalid/p"))
     await booth.start()
 
     assert booth.state.fault == "Cannot save photos"

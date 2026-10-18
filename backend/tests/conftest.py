@@ -1,11 +1,15 @@
 import asyncio
+import threading
 from collections.abc import Callable
+from email.message import Message
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
 from photobooth.camera.fake import FakeCamera
-from photobooth.config import Timings
+from photobooth.config import LiveSettings, Timings
 from photobooth.session import Booth, BoothState, Screen
 from photobooth.store import CaptureStore
 
@@ -39,8 +43,9 @@ def store(tmp_path: Path) -> CaptureStore:
 async def make_booth(camera, store, fast_timings):
     booths: list[Booth] = []
 
-    def make(booth_camera=None, timings: Timings | None = None) -> Booth:
-        booth = Booth(booth_camera or camera, store, timings or fast_timings)
+    def make(booth_camera=None, timings: Timings | None = None, settings: LiveSettings | None = None) -> Booth:
+        settings = settings or LiveSettings(timings or fast_timings, "https://photo.example.invalid/p")
+        booth = Booth(booth_camera or camera, store, settings)
         booths.append(booth)
         return booth
 
@@ -82,3 +87,64 @@ def await_state():
 @pytest.fixture
 def await_screen():
     return wait_for_screen
+
+
+class RemoteConfig:
+    """A real HTTP server on 127.0.0.1 serving one TOML document, honouring If-None-Match."""
+
+    def __init__(self) -> None:
+        self.body = b""
+        self.etag: str | None = None
+        self.status = HTTPStatus.OK
+        self.requests: list[Message] = []
+        remote = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                remote.requests.append(self.headers)
+                if remote.status is not HTTPStatus.OK:
+                    self.send_error(remote.status)
+                    return
+                if remote.etag is not None and self.headers.get("If-None-Match") == remote.etag:
+                    self.send_response(HTTPStatus.NOT_MODIFIED)
+                    self.end_headers()
+                    return
+                self.send_response(HTTPStatus.OK)
+                if remote.etag is not None:
+                    self.send_header("ETag", remote.etag)
+                self.send_header("Content-Length", str(len(remote.body)))
+                self.end_headers()
+                self.wfile.write(remote.body)
+
+            def log_message(self, *args) -> None:
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}/photobooth.toml"
+        self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.05})
+
+    def serve(self, text: str, etag: str | None = None) -> None:
+        self.body = text.encode("utf-8")
+        self.etag = etag
+        self.status = HTTPStatus.OK
+
+    def fail(self, status: HTTPStatus) -> None:
+        self.status = status
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Closes the listening socket, so the URL refuses connections."""
+        if self._thread.is_alive():
+            self._server.shutdown()
+            self._thread.join()
+        self._server.server_close()
+
+
+@pytest.fixture
+def remote():
+    server = RemoteConfig()
+    server.start()
+    yield server
+    server.stop()

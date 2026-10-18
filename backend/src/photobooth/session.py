@@ -11,7 +11,7 @@ from functools import partial
 from pathlib import Path
 
 from photobooth.camera import Camera, CameraError, Frame
-from photobooth.config import Timings
+from photobooth.config import LiveSettings, Timings
 from photobooth.media import MediaError, build_boomerang, build_video
 from photobooth.store import BOOMERANG, CLIP, PHOTO, VIDEO, CaptureStore
 
@@ -55,13 +55,14 @@ class Booth:
 
     State transitions and the camera's start, stop and capture_still run under one lock.
     _tick and next_frame run unlocked: FrameHub is thread-safe, and no other camera call
-    can run during COUNTDOWN.
+    can run during COUNTDOWN. Each countdown takes the timings current when it begins and keeps
+    them through its capture, so a reload never changes a capture in progress.
     """
 
-    def __init__(self, camera: Camera, store: CaptureStore, timings: Timings) -> None:
+    def __init__(self, camera: Camera, store: CaptureStore, settings: LiveSettings) -> None:
         self._camera = camera
         self._store = store
-        self._timings = timings
+        self._settings = settings
         self.state = BoothState(Screen.IDLE)
         self._lock = asyncio.Lock()
         self._subscribers: set[asyncio.Queue[BoothState]] = set()
@@ -159,31 +160,32 @@ class Booth:
         if fault:
             self._set_state(BoothState(Screen.IDLE, fault=fault))
             return
-        self._set_state(BoothState(Screen.COUNTDOWN, remaining=math.ceil(self._timings.countdown_s)))
-        self._countdown = asyncio.create_task(self._count_down(time.monotonic()))
+        timings = self._settings.timings
+        self._set_state(BoothState(Screen.COUNTDOWN, remaining=math.ceil(timings.countdown_s)))
+        self._countdown = asyncio.create_task(self._count_down(time.monotonic(), timings))
 
-    async def _count_down(self, began: float) -> None:
+    async def _count_down(self, began: float, timings: Timings) -> None:
         try:
-            frames = await self._run_countdown(began)
+            frames = await self._run_countdown(began, timings)
         except Exception:
             logger.exception("camera failed during the countdown")
             frames = None
         async with self._lock:
             if frames is not None:
                 try:
-                    await self._shoot(frames)
+                    await self._shoot(frames, timings)
                     return
                 except Exception:
                     logger.exception("capture failed")
-            await self._fail()
+            await self._fail(timings)
 
-    async def _run_countdown(self, began: float) -> list[Frame]:
-        shot_at = began + self._timings.countdown_s
+    async def _run_countdown(self, began: float, timings: Timings) -> list[Frame]:
+        shot_at = began + timings.countdown_s
         ticker = asyncio.create_task(self._tick(shot_at))
         try:
             async with self._lock:
                 await asyncio.to_thread(self._camera.start)
-            return await self._record(began + self._timings.record_start_s, shot_at)
+            return await self._record(began + timings.record_start_s, shot_at)
         finally:
             ticker.cancel()
             await asyncio.wait({ticker})
@@ -209,7 +211,7 @@ class Booth:
                 frames.append(frame)
         return frames
 
-    async def _shoot(self, frames: list[Frame]) -> None:
+    async def _shoot(self, frames: list[Frame], timings: Timings) -> None:
         self._update(screen=Screen.CAPTURING, remaining=None)
         clip = [frame.jpeg for frame in frames]
         fps = _measure_fps(frames)
@@ -218,16 +220,16 @@ class Booth:
         await asyncio.to_thread(self._store.create, capture_id, photo, clip, fps)
         await asyncio.to_thread(self._camera.stop)
         self._set_state(BoothState(Screen.RESULT, capture_id=capture_id, delete_available=True))
-        self._schedule(_DELETE_WINDOW, self._timings.delete_window_s, self._keep_current)
-        self._schedule(_RESULT_TIMEOUT, self._timings.result_timeout_s, self._time_out)
-        build = asyncio.create_task(self._build_media(capture_id, photo, clip, fps))
+        self._schedule(_DELETE_WINDOW, timings.delete_window_s, self._keep_current)
+        self._schedule(_RESULT_TIMEOUT, timings.result_timeout_s, self._time_out)
+        build = asyncio.create_task(self._build_media(capture_id, photo, clip, fps, timings))
         self._builds.add(build)
         build.add_done_callback(self._builds.discard)
 
-    async def _fail(self) -> None:
+    async def _fail(self, timings: Timings) -> None:
         await self._stop_camera()
         self._set_idle(FAILURE_MESSAGE)
-        self._schedule(_MESSAGE, self._timings.message_s, self._clear_message)
+        self._schedule(_MESSAGE, timings.message_s, self._clear_message)
 
     async def _force_idle(self) -> None:
         self._cancel_timers(_DELETE_WINDOW, _RESULT_TIMEOUT)
@@ -257,8 +259,9 @@ class Booth:
     async def _clear_message(self) -> None:
         self._update(message=None)
 
-    async def _build_media(self, capture_id: str, photo: bytes, clip: Sequence[bytes], fps: float) -> None:
-        timings = self._timings
+    async def _build_media(
+        self, capture_id: str, photo: bytes, clip: Sequence[bytes], fps: float, timings: Timings
+    ) -> None:
         try:
             async with self._build_slot:
                 if not self._store.exists(capture_id):

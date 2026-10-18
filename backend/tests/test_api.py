@@ -1,7 +1,9 @@
 import asyncio
 import json
+import logging
 import socket
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -9,20 +11,36 @@ import pytest
 import uvicorn
 
 from photobooth.api import create_app
+from photobooth.reloader import ConfigReloader
 from photobooth.session import Booth, Screen
 from photobooth.sharing import qr_svg, share_url
 
 SHARE_BASE = "https://photo.example.invalid/p"
 SVG_NAMESPACE = "{http://www.w3.org/2000/svg}"
+REMOTE_BASE = "https://remote.example.invalid/s"
+
+
+def write_config(path: Path, top: str = "") -> Path:
+    path.write_text(
+        f'share_base_url = "{SHARE_BASE}"\nmedia_dir = "media"\n{top}\n[camera]\nkind = "fake"\n', encoding="utf-8"
+    )
+    return path
 
 
 @pytest.fixture
-async def serve(make_booth, camera, store):
+def reloader(tmp_path) -> ConfigReloader:
+    return ConfigReloader(write_config(tmp_path / "config.toml"))
+
+
+@pytest.fixture
+async def serve(make_booth, camera, store, reloader):
     """Runs the app, lifespan included, on a real socket: streaming responses cannot be read through ASGITransport."""
     running: list[tuple[uvicorn.Server, asyncio.Task, httpx.AsyncClient]] = []
 
-    async def start(frontend_dir: Path | None = None, booth: Booth | None = None) -> httpx.AsyncClient:
-        app = create_app(booth or make_booth(), camera, store, SHARE_BASE, frontend_dir)
+    async def start(
+        frontend_dir: Path | None = None, booth: Booth | None = None, app_reloader: ConfigReloader | None = None
+    ) -> httpx.AsyncClient:
+        app = create_app(booth or make_booth(), camera, store, app_reloader or reloader, frontend_dir)
         sock = socket.socket()
         sock.bind(("127.0.0.1", 0))
         config = uvicorn.Config(app, log_level="warning", timeout_graceful_shutdown=1)
@@ -93,6 +111,29 @@ async def test_tap_to_result_over_http(client):
     assert photo.status_code == 200
     assert photo.headers["content-type"] == "image/jpeg"
     assert photo.content.startswith(b"\xff\xd8")
+
+
+async def test_a_remote_share_base_applies_to_the_next_capture_and_a_remote_camera_is_ignored(
+    serve, make_booth, fast_timings, tmp_path, remote, caplog
+):
+    remote.serve("")
+    reloader = ConfigReloader(write_config(tmp_path / "remote.toml", f'remote_config_url = "{remote.url}"'))
+    booth = make_booth(timings=replace(fast_timings, result_timeout_s=30))
+    client = await serve(booth=booth, app_reloader=reloader)
+    first = await take_photo(client)
+    remote.serve(f'share_base_url = "{REMOTE_BASE}"\n\n[camera]\nkind = "ffmpeg"\n')
+
+    with caplog.at_level(logging.WARNING):
+        await reloader.poll()
+    assert (await client.post("/api/new-photo")).status_code == 204
+    second = await await_event(
+        client, lambda event: event["screen"] == "result" and event["capture_id"] != first["capture_id"]
+    )
+
+    assert first["share_url"] == f"{SHARE_BASE}/{first['capture_id']}"
+    assert second["share_url"] == f"{REMOTE_BASE}/{second['capture_id']}"
+    [warning] = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+    assert "'camera'" in warning
 
 
 async def test_delete_within_window_is_204_and_removes_the_capture(client):
@@ -217,14 +258,14 @@ async def test_a_tap_through_the_dev_proxy_is_accepted(serve, make_booth):
     assert booth.state.screen is not Screen.IDLE
 
 
-async def test_the_camera_stops_even_if_closing_the_booth_fails(make_booth, camera, store, monkeypatch):
+async def test_the_camera_stops_even_if_closing_the_booth_fails(make_booth, camera, store, reloader, monkeypatch):
     booth = make_booth()
 
     async def broken_close():
         raise RuntimeError("close failed")
 
     monkeypatch.setattr(booth, "close", broken_close)
-    app = create_app(booth, camera, store, SHARE_BASE, None)
+    app = create_app(booth, camera, store, reloader, None)
 
     with pytest.raises(RuntimeError):
         async with app.router.lifespan_context(app):

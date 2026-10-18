@@ -30,6 +30,15 @@ def test_defaults_fill_missing_keys(tmp_path):
     assert config.camera.kind == "fake"
     assert config.share_base_url == "https://photo.example.invalid/p"
     assert (config.host, config.port) == ("127.0.0.1", 8000)
+    assert (config.remote_config_url, config.config_poll_s) == (None, 60.0)
+
+
+@pytest.mark.parametrize("top", ["config_poll_s = 0", 'config_poll_s = "60"', "remote_config_url = 1"])
+def test_reload_keys_are_validated(tmp_path, top):
+    path = write_config(tmp_path / "config.toml", top + "\n" + MINIMAL)
+
+    with pytest.raises(ValueError, match=top.split(" ")[0]):
+        load_config(path)
 
 
 def test_unknown_key_is_rejected(tmp_path):
