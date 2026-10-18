@@ -1,7 +1,9 @@
 import tomllib
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Literal
+
+REMOTE_KEYS = {"share_base_url", "timings"}
 
 
 @dataclass(frozen=True)
@@ -37,26 +39,64 @@ class Config:
 
 def load_config(path: Path) -> Config:
     data = tomllib.loads(path.read_text(encoding="utf-8"))
-    camera_table = data.pop("camera", {})
-    timings_table = data.pop("timings", {})
+    camera_table = _table(data.pop("camera", {}), "[camera]")
+    timings_table = _table(data.pop("timings", {}), "[timings]")
     _reject_unknown(data, {"share_base_url", "media_dir", "host", "port"}, "top level")
     _reject_unknown(camera_table, _field_names(CameraConfig), "[camera]")
-    _reject_unknown(timings_table, _field_names(Timings), "[timings]")
+    _require(camera_table, "kind", "[camera]")
+    _require(data, "media_dir", "top level")
 
-    timings = Timings(**timings_table)
+    return Config(
+        camera=CameraConfig(**camera_table),
+        timings=_timings(Timings(), timings_table),
+        share_base_url=_share_base_url(data),
+        media_dir=(path.parent / data["media_dir"]).resolve(),
+        **{key: data[key] for key in ("host", "port") if key in data},
+    )
+
+
+def with_remote(config: Config, document: dict) -> Config:
+    """The config with the share base and timings of a remote document laid over it."""
+    share_base_url = _share_base_url(document) if "share_base_url" in document else config.share_base_url
+    timings = _timings(config.timings, _table(document.get("timings", {}), "[timings]"))
+    return replace(config, share_base_url=share_base_url, timings=timings)
+
+
+def ignored_remote_keys(document: dict) -> list[str]:
+    return sorted(set(document) - REMOTE_KEYS)
+
+
+def _timings(base: Timings, table: dict) -> Timings:
+    _reject_unknown(table, _field_names(Timings), "[timings]")
+    for key, value in table.items():
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueError(f"{key} in [timings] must be a number, not {value!r}")
+    timings = replace(base, **table)
     if timings.record_start_s >= timings.countdown_s:
         raise ValueError(
             f"record_start_s ({timings.record_start_s}) must be less than "
             f"countdown_s ({timings.countdown_s})"
         )
+    return timings
 
-    return Config(
-        camera=CameraConfig(**camera_table),
-        timings=timings,
-        share_base_url=data["share_base_url"],
-        media_dir=(path.parent / data["media_dir"]).resolve(),
-        **{key: data[key] for key in ("host", "port") if key in data},
-    )
+
+def _share_base_url(table: dict) -> str:
+    _require(table, "share_base_url", "top level")
+    value = table["share_base_url"]
+    if not isinstance(value, str):
+        raise ValueError(f"share_base_url must be a string, not {value!r}")
+    return value
+
+
+def _table(value: object, where: str) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError(f"{where} must be a table, not {value!r}")
+    return value
+
+
+def _require(table: dict, key: str, where: str) -> None:
+    if key not in table:
+        raise ValueError(f"missing key {key!r} in {where}")
 
 
 def _field_names(cls: type) -> set[str]:

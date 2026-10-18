@@ -1,8 +1,9 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from photobooth.config import Timings, load_config
+from photobooth.config import Timings, ignored_remote_keys, load_config, with_remote
 
 
 def write_config(path: Path, body: str) -> Path:
@@ -49,3 +50,57 @@ def test_media_dir_relative_to_config_file(tmp_path):
     config = load_config(write_config(tmp_path / "cfg" / "config.toml", MINIMAL))
 
     assert config.media_dir == tmp_path / "cfg" / "media"
+
+
+def test_a_non_numeric_timing_is_rejected(tmp_path):
+    path = write_config(tmp_path / "config.toml", MINIMAL + '\n[timings]\nflash_s = "2"\n')
+
+    with pytest.raises(ValueError, match="flash_s"):
+        load_config(path)
+
+
+def test_a_missing_required_key_is_a_value_error(tmp_path):
+    path = write_config(tmp_path / "config.toml", MINIMAL.replace('media_dir = "media"', ""))
+
+    with pytest.raises(ValueError, match="media_dir"):
+        load_config(path)
+
+
+@pytest.fixture
+def local(tmp_path):
+    timings = "\n[timings]\ncountdown_s = 5.0\nflash_s = 1.5\n"
+    return load_config(write_config(tmp_path / "config.toml", MINIMAL + timings))
+
+
+def test_remote_overrides_the_share_base_and_merges_into_the_local_timings(local):
+    effective = with_remote(
+        local, {"share_base_url": "https://remote.example.invalid/s", "timings": {"countdown_s": 4.0}}
+    )
+
+    assert effective.share_base_url == "https://remote.example.invalid/s"
+    assert effective.timings == replace(local.timings, countdown_s=4.0)
+    assert effective.timings.flash_s == 1.5
+    assert replace(effective, share_base_url=local.share_base_url, timings=local.timings) == local
+
+
+def test_remote_keys_other_than_share_base_and_timings_are_named_and_not_applied(local):
+    document = {"camera": {"kind": "ffmpeg"}, "port": 9000, "share_base_url": "https://remote.example.invalid/s"}
+
+    assert ignored_remote_keys(document) == ["camera", "port"]
+    effective = with_remote(local, document)
+    assert (effective.camera, effective.port) == (local.camera, local.port)
+
+
+@pytest.mark.parametrize(
+    ("document", "named"),
+    [
+        ({"timings": {"countdwn_s": 2}}, "countdwn_s"),
+        ({"timings": {"countdown_s": 0.5}}, "record_start_s"),
+        ({"timings": {"countdown_s": "4"}}, "countdown_s"),
+        ({"timings": 4}, "timings"),
+        ({"share_base_url": 5}, "share_base_url"),
+    ],
+)
+def test_remote_settings_are_validated_like_the_local_file(local, document, named):
+    with pytest.raises(ValueError, match=named):
+        with_remote(local, document)
