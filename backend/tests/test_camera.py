@@ -119,14 +119,14 @@ def test_make_camera_selects_by_kind():
     assert isinstance(make_camera(CameraConfig(kind="ffmpeg", device="cam")), FfmpegCamera)
 
 
-def test_build_command_copies_the_mjpeg_stream_from_the_configured_device():
+def test_build_command_mirrors_the_mjpeg_stream_from_the_configured_device():
     config = CameraConfig(kind="ffmpeg", device="Innomaker-U20CAM-1080p-S1")
 
     assert build_command(config) == [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-f", "dshow", "-vcodec", "mjpeg", "-video_size", "1920x1080", "-framerate", "30",
         "-i", "video=Innomaker-U20CAM-1080p-S1",
-        "-c:v", "copy", "-f", "mjpeg", "pipe:1",
+        "-vf", "hflip", "-c:v", "mjpeg", "-q:v", "2", "-f", "mjpeg", "pipe:1",
     ]  # fmt: skip
 
 

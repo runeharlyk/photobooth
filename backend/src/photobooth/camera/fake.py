@@ -2,7 +2,7 @@ import io
 import threading
 import time
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from photobooth.camera import START_TIMEOUT_S, CameraError, Frame, FrameHub
 
@@ -89,5 +89,5 @@ def _render(size: tuple[int, int], label: str) -> bytes:
     font = ImageFont.load_default(size=size[1] // 4)
     draw.text((size[0] // 2, size[1] // 2), label, fill=(43, 217, 107), font=font, anchor="mm")
     buffer = io.BytesIO()
-    image.save(buffer, "JPEG", quality=80)
+    ImageOps.mirror(image).save(buffer, "JPEG", quality=80)
     return buffer.getvalue()

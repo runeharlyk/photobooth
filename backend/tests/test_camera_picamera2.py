@@ -36,6 +36,12 @@ def test_preview_delivers_close_to_thirty_fps(camera):
     assert fps > 20
 
 
+def test_preview_sees_the_whole_sensor_like_the_still(camera):
+    camera.start()
+    crop = camera._picam.capture_metadata()["ScalerCrop"]
+    assert (crop[2], crop[3]) == (4608, 2592)
+
+
 def test_still_is_full_sensor_resolution(camera):
     camera.start()
     still = camera.capture_still()

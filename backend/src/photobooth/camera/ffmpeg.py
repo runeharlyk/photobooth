@@ -18,7 +18,7 @@ def build_command(config: CameraConfig) -> list[str]:
         "-f", config.input_format, "-vcodec", "mjpeg",
         "-video_size", config.video_size, "-framerate", str(config.framerate),
         "-i", f"video={config.device}",
-        "-c:v", "copy", "-f", "mjpeg", "pipe:1",
+        "-vf", "hflip", "-c:v", "mjpeg", "-q:v", "2", "-f", "mjpeg", "pipe:1",
     ]  # fmt: skip
 
 

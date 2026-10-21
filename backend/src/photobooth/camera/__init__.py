@@ -20,6 +20,8 @@ class CameraError(Exception):
 
 
 class Camera(Protocol):
+    """A camera whose preview frames and stills are all mirrored, as a guest sees themself."""
+
     @property
     def running(self) -> bool: ...
 

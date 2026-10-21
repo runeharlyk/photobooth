@@ -1,6 +1,6 @@
 import io
 
-from libcamera import controls
+from libcamera import Transform, controls
 from picamera2 import Picamera2
 from picamera2.encoders import MJPEGEncoder
 from picamera2.outputs import FileOutput
@@ -8,6 +8,8 @@ from picamera2.outputs import FileOutput
 from photobooth.camera import START_TIMEOUT_S, CameraError, Frame, FrameHub
 
 PREVIEW_SIZE = (1280, 720)
+FULL_VIEW_SENSOR_SIZE = (2304, 1296)
+MIRRORED = Transform(hflip=True)
 STILL_QUALITY = 95
 
 
@@ -24,7 +26,11 @@ class _HubOutput(io.BufferedIOBase):
 
 
 class Picamera2Camera:
-    """Camera Module 3 through picamera2: hardware MJPEG preview, full-resolution stills."""
+    """Camera Module 3 through picamera2: hardware MJPEG preview, full-resolution stills.
+
+    The preview reads the 2x2-binned full-sensor mode; left to choose, libcamera picks the
+    1536x864 mode, which is cropped to the centre and so looks zoomed in next to the still.
+    """
 
     def __init__(self) -> None:
         self._hub = FrameHub()
@@ -41,7 +47,13 @@ class Picamera2Camera:
         baseline = self._hub.open()
         try:
             self._picam = Picamera2()
-            self._picam.configure(self._picam.create_video_configuration(main={"size": PREVIEW_SIZE, "format": "YUV420"}))
+            self._picam.configure(
+                self._picam.create_video_configuration(
+                    main={"size": PREVIEW_SIZE, "format": "YUV420"},
+                    sensor={"output_size": FULL_VIEW_SENSOR_SIZE},
+                    transform=MIRRORED,
+                )
+            )
             self._picam.options["quality"] = STILL_QUALITY
             if "AfMode" in self._picam.camera_controls:
                 self._picam.set_controls({"AfMode": controls.AfModeEnum.Continuous})
@@ -72,7 +84,9 @@ class Picamera2Camera:
         still = io.BytesIO()
         try:
             self._picam.stop_encoder()
-            self._picam.switch_mode_and_capture_file(self._picam.create_still_configuration(), still, format="jpeg")
+            self._picam.switch_mode_and_capture_file(
+                self._picam.create_still_configuration(transform=MIRRORED), still, format="jpeg"
+            )
         except Exception as error:
             self._hub.fail(f"still capture failed: {error}")
             raise CameraError(f"still capture failed: {error}") from error
